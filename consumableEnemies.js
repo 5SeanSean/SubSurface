@@ -1,6 +1,7 @@
 // filepath: /h:/Downloads/PLATZIO/playerConsumables.js
 import { createLava } from "./lava.js";
 import { physics } from "./physics.js";
+import { GAME_CONFIG } from "./config.js";
 export class Consumable {
     constructor(x, y, size, color, shape = 'square', xPhysics =0, yPhysics =0) {
         this.x = x;
@@ -37,36 +38,32 @@ export class Consumable {
 update(nearbyPlatforms, worldBounds, canvas) {
     // Apply gravity
     this.dy += this.gravity;
-    if (this.y > worldBounds.bottom - canvas.height/18) {
+    if (this.y > worldBounds.bottom - GAME_CONFIG.REF_HEIGHT/18) {
         this.dy -= this.gravity * 2;
     }
     
-    // Check for collisions with nearby platforms only
+    // Check for collisions with nearby platforms only.
+    // Same resolver as LavaSquare.checkPlatformCollisions: smallest-penetration axis,
+    // ejection direction by center-side (position), not velocity sign — velocity lies
+    // about which side you're on when platforms drift, which pops objects through.
     for (const platform of nearbyPlatforms) {
-        if (this.x + this.size > platform.x &&
-            this.x < platform.x + platform.width &&
-            this.y + this.size > platform.y &&
-            this.y < platform.y + platform.height) {
-            
-            // Collision from the top
-            if (this.dy > 0 && this.y + this.size > platform.y && this.y < platform.y) {
-                this.y = platform.y - this.size;
-                this.dy = 0;
-            }
-            // Collision from the bottom
-            else if (this.dy < 0 && this.y < platform.y + platform.height && this.y + this.size > platform.y + platform.height) {
-                this.y = platform.y + platform.height;
-                this.dy = 0;
-            }
-            // Collision from the left
-            else if (this.dx > 0 && this.x + this.size > platform.x && this.x < platform.x) {
-                this.x = platform.x - this.size;
+        const left = this.x, right = this.x + this.size;
+        const top = this.y, bottom = this.y + this.size;
+        const pLeft = platform.x, pRight = platform.x + platform.width;
+        const pTop = platform.y, pBottom = platform.y + platform.height;
+
+        if (right > pLeft && left < pRight && bottom > pTop && top < pBottom) {
+            const penX = Math.min(right - pLeft, pRight - left);
+            const penY = Math.min(bottom - pTop, pBottom - top);
+
+            if (penX < penY) {
+                if (this.x + this.size / 2 < pLeft + platform.width / 2) this.x = pLeft - this.size;
+                else this.x = pRight;
                 this.dx = 0;
-            }
-            // Collision from the right
-            else if (this.dx < 0 && this.x < platform.x + platform.width && this.x + this.size > platform.x + platform.width) {
-                this.x = platform.x + platform.width;
-                this.dx = 0;
+            } else {
+                if (this.y + this.size / 2 < pTop + platform.height / 2) this.y = pTop - this.size;
+                else this.y = pBottom;
+                this.dy = 0;
             }
         }
     }
@@ -131,10 +128,12 @@ export function updateConsumables(consumables, ball, projectiles, endGame, platf
         
         physics(consumable);
         
-        // Get nearby platforms using spatial grid
-        const nearbyPlatforms = platforms.getNearbyPlatforms?.(
+        // Get nearby platforms using spatial grid.
+        // No optional chaining: passing the wrong thing here should throw, not silently
+        // return zero platforms (that bug let consumables fall through the world).
+        const nearbyPlatforms = platforms.getNearbyPlatforms(
             consumable.x, consumable.y, consumable.size, consumable.size
-        ) || [];
+        );
         
         // Update consumable with only nearby platforms
         if (consumable.update(nearbyPlatforms, worldBounds, canvas) || 

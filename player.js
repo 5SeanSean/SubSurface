@@ -1,26 +1,28 @@
 // filepath: /h:/Downloads/PLATZIO/player.js
 import { physics } from './physics.js';
-import { winSizeConstant } from './main.js';
+import { now } from './clock.js';
 import { GAME_CONFIG } from './config.js';
 
 export let mouseXAdjusted = 0;
 export let mouseYAdjusted = 0;
 
 export function setupPlayer(canvas, ctx, platforms, endGame, worldBounds) {
+    const H = GAME_CONFIG.REF_HEIGHT; // sim units are fixed to reference height, not the window
     const ball = {
         x: worldBounds.right / 2,
-        y: canvas.height / 16,
-        radius: canvas.height / 18,
-        speed: canvas.height / 270,
+        y: H / 16,
+        radius: H / 18,
+        speed: H / 270,
         dx: 0,
         dy: 0,
-        gravity: canvas.height / 10000,
-        jumpPower: -canvas.height / 100,
+        gravity: H / 10000,
+        jumpPower: -H / 100,
         isJumping: false,
         canDoubleJump: true,
-        friction: canvas.height / 1080,
+        friction: 0.87, // per-frame horizontal damping (<1 so the ball decelerates).
+                        // Was H/1080 — which is exactly 1.0 at reference height = no decay.
         fireRate: 200,
-        projSpeed: canvas.height / 50,
+        projSpeed: H / 50,
         currentStock: 10,
         maxStock: 10,
         isGameRunning: false,
@@ -49,84 +51,78 @@ export function setupPlayer(canvas, ctx, platforms, endGame, worldBounds) {
     function resetPlayer() {
         ball.isGameRunning = false;
         ball.x = worldBounds.right / 2;
-        ball.y = canvas.height / 16;
+        ball.y = H / 16;
         ball.dx = 0;
         ball.dy = 0;
         ball.currentStock = ball.maxStock;
         ball.isJumping = false;
         ball.canDoubleJump = true;
-        ball.radius = canvas.height / 18;
+        ball.radius = H / 18;
         ball.score = 0;
-        isShooting = false;
-        keysPressed.clear();
+        input.shooting = false;
+        input.jumpPressed = false;
+        input.keys.clear();
     }
     
-    // Optimized input handling
-    const keysPressed = new Set();
-    let isShooting = false;
+    // Input state — the ONLY channel between the input source and the simulation.
+    // The browser DOM handlers below write it; the sim (updateBall/handleShooting)
+    // reads it. An authoritative server would fill the same shape from network
+    // packets instead of DOM events, and nothing in the sim would change.
+    const input = {
+        keys: new Set(),    // held movement keys (a/d/s + arrows)
+        shooting: false,    // fire button held
+        mouseX: 0,
+        mouseY: 0,
+        jumpPressed: false  // edge: set on a jump keydown, consumed once per tick
+    };
     let lastShotTime = 0;
     const fireRate = ball.fireRate;
-    let mouseX = 0;
-    let mouseY = 0;
     
     // Input handling with debouncing
+    // DOM handlers only translate events into `input` state — no game logic here,
+    // so this whole block is what a network input source replaces.
     function handleKeyDown(event) {
         const key = event.key.toLowerCase();
-        keysPressed.add(key);
-        
-        // Handle jump (space, w, arrowup)
+        input.keys.add(key);
         if ((key === ' ' || key === 'w' || key === 'arrowup') && ball.isGameRunning) {
-            if (!ball.isJumping) {
-                ball.dy = ball.jumpPower * ball.strength;
-                ball.isJumping = true;
-                ball.canDoubleJump = true;
-            } else if (ball.canDoubleJump) {
-                ball.dy = ball.jumpPower * ball.strength;
-                ball.canDoubleJump = false;
-            }
+            input.jumpPressed = true;
             event.preventDefault(); // Prevent spacebar from scrolling
         }
     }
-    
+
     function handleKeyUp(event) {
-        const key = event.key.toLowerCase();
-        keysPressed.delete(key);
+        input.keys.delete(event.key.toLowerCase());
     }
-    
+
     // Mouse handling
     function handleMouseDown(event) {
         if (event.button === 0 && ball.isGameRunning) {
-            isShooting = true;
-            const currentTime = Date.now();
-            if (currentTime - lastShotTime >= fireRate) {
-                shootProjectile();
-                lastShotTime = currentTime;
-            }
+            input.shooting = true;
         }
         updateMousePosition(event);
     }
-    
+
     function handleMouseUp(event) {
         if (event.button === 0) {
-            isShooting = false;
+            input.shooting = false;
         }
         updateMousePosition(event);
     }
-    
+
     function handleMouseMove(event) {
         updateMousePosition(event);
     }
-    
+
     function updateMousePosition(event) {
-        mouseX = event.clientX;
-        mouseY = event.clientY;
+        input.mouseX = event.clientX;
+        input.mouseY = event.clientY;
     }
     
     // Update ball direction based on keys
     function updateBallDirection() {
-        const hasA = keysPressed.has('a') || keysPressed.has('arrowleft');
-        const hasD = keysPressed.has('d') || keysPressed.has('arrowright');
-        const hasS = keysPressed.has('s') || keysPressed.has('arrowdown');
+        const hasA = input.keys.has('a') || input.keys.has('arrowleft');
+        const hasD = input.keys.has('d') || input.keys.has('arrowright');
+        const hasS = input.keys.has('s') || input.keys.has('arrowdown');
         
         if (hasA && hasD) {
             ball.dx = 0;
@@ -152,8 +148,8 @@ export function setupPlayer(canvas, ctx, platforms, endGame, worldBounds) {
         ctx.shadowColor = 'white';
         ctx.shadowBlur = ball.radius / 2;
         
-        mouseXAdjusted = mouseX + pCamera.x;
-        mouseYAdjusted = mouseY + pCamera.y;
+        mouseXAdjusted = input.mouseX + pCamera.x;
+        mouseYAdjusted = input.mouseY + pCamera.y;
         
         // Draw stick pointing at cursor
         const stickLength = (ball.radius) * (ball.currentStock / ball.maxStock) + ball.radius;
@@ -214,9 +210,21 @@ export function setupPlayer(canvas, ctx, platforms, endGame, worldBounds) {
     function updateBall() {
         ball.angle = Math.atan2(mouseYAdjusted - ball.y, mouseXAdjusted - ball.x);
         updatePCamera();
-        
-        document.getElementById('scoreCounter').innerText = `Score: ${Math.round(ball.score * winSizeConstant)}`;
-        
+
+        // Consume a queued jump this tick (was applied inline in the old keydown handler)
+        if (input.jumpPressed && ball.isGameRunning) {
+            if (!ball.isJumping) {
+                ball.dy = ball.jumpPower * ball.strength;
+                ball.isJumping = true;
+                ball.canDoubleJump = true;
+            } else if (ball.canDoubleJump) {
+                ball.dy = ball.jumpPower * ball.strength;
+                ball.canDoubleJump = false;
+            }
+        }
+        input.jumpPressed = false;
+
+        // Score readout is UI/render — updated in main.js draw(), not here in the sim.
         updateBallDirection();
         
         ball.x += ball.dx * (0.2 + ball.strength * 0.8) + ball.xPhysics;
@@ -250,7 +258,7 @@ export function setupPlayer(canvas, ctx, platforms, endGame, worldBounds) {
         }
         
         // Game over conditions
-        if (ball.radius < canvas.height / 40) {
+        if (ball.radius < H / 40) {
             endGame();
         }
         
@@ -307,9 +315,9 @@ export function setupPlayer(canvas, ctx, platforms, endGame, worldBounds) {
             }
             
             // Remove out of bounds projectiles
-            if (projectile.x < ball.x - canvas.width || 
-                projectile.x > ball.x + canvas.width || 
-                projectile.y < 0 || 
+            if (projectile.x < ball.x - GAME_CONFIG.REF_WIDTH ||
+                projectile.x > ball.x + GAME_CONFIG.REF_WIDTH ||
+                projectile.y < 0 ||
                 projectile.y > worldBounds.bottom || 
                 projectile.ricochetCount >= 3) {
                 ball.projectiles.splice(i, 1);
@@ -318,8 +326,8 @@ export function setupPlayer(canvas, ctx, platforms, endGame, worldBounds) {
     }
     
     function handleShooting() {
-        if (isShooting) {
-            const currentTime = Date.now();
+        if (input.shooting) {
+            const currentTime = now();
             if (currentTime - lastShotTime >= fireRate) {
                 shootProjectile();
                 lastShotTime = currentTime;

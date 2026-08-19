@@ -117,7 +117,7 @@ class Platform {
 }
 
 export function setupPlatforms(canvas, worldBounds) {
-    const maxPlatDY = (canvas.height / 1000);
+    const maxPlatDY = (GAME_CONFIG.REF_HEIGHT / 1000);
     const platforms = [];
     
     function newPlatform() {
@@ -127,7 +127,7 @@ export function setupPlatforms(canvas, worldBounds) {
             Math.random() * (worldBounds.right / 25) + (worldBounds.right / 40),
             Math.random() * (worldBounds.bottom / 170) + (worldBounds.bottom / 90),
             0,
-            Math.random() * (canvas.height / 3000) + (canvas.height / 2000),
+            Math.random() * (GAME_CONFIG.REF_HEIGHT / 3000) + (GAME_CONFIG.REF_HEIGHT / 2000),
             0,
             0,
             canvas
@@ -155,7 +155,7 @@ export function setupPlatforms(canvas, worldBounds) {
             Math.random() * (worldBounds.right / 25) + (worldBounds.right / 40),
             Math.random() * (worldBounds.bottom / 170) + (worldBounds.bottom / 90),
             0,
-            Math.random() * (maxPlatDY - canvas.height / 2000) + (canvas.height / 2000),
+            Math.random() * (maxPlatDY - GAME_CONFIG.REF_HEIGHT / 2000) + (GAME_CONFIG.REF_HEIGHT / 2000),
             0,
             0,
             canvas
@@ -179,7 +179,7 @@ export function setupPlatforms(canvas, worldBounds) {
             (worldBounds.right / 60),
             (worldBounds.bottom / 30),
             0,
-            Math.random() * (canvas.height / 3000) + (canvas.height / 2000),
+            Math.random() * (GAME_CONFIG.REF_HEIGHT / 3000) + (GAME_CONFIG.REF_HEIGHT / 2000),
             0,
             0,
             canvas
@@ -224,7 +224,16 @@ export function setupPlatforms(canvas, worldBounds) {
         ctx.restore();
     }
     
+// Single-player entry point: move platforms once, then collide the one ball.
+// The authoritative World calls the two halves separately (movement once per tick,
+// then ball-collision for each connected player).
 function updatePlatforms(ball) {
+    updatePlatformsMovement();
+    checkBallPlatformCollisions(ball, null);
+}
+
+// Ball-independent platform update: splashes, movement, platform-platform collisions.
+function updatePlatformsMovement() {
     // Update platform splashes
     for (let i = genPlatSplashes.length - 1; i >= 0; i--) {
         genPlatSplashes[i].update();
@@ -269,9 +278,6 @@ function updatePlatforms(ball) {
     
     // Check platform-platform collisions using spatial grid
     checkPlatformPlatformCollisions();
-    
-    // Check ball-platform collisions using spatial grid
-    checkBallPlatformCollisions(ball, canvas);
 }
 
 function checkPlatformPlatformCollisions() {
@@ -400,7 +406,7 @@ function checkBallPlatformCollisions(ball, canvas) {
                         ball.dy = ball.dy / 1.5;
                     }
                 } else {
-                    if (ball.dy < platform.dy && ball.dy > canvas.height / 2000) {
+                    if (ball.dy < platform.dy && ball.dy > GAME_CONFIG.REF_HEIGHT / 2000) {
                         ballHarming(ball);
                         genPlatSplashes.push(new Splash(ball.x, ball.y, ball.radius, 'white'));
                     } else {
@@ -418,7 +424,9 @@ return {
     platforms,
     drawPlatforms,
     generatePlatforms,
-    updatePlatforms,
+    updatePlatforms,                                  // single-player: movement + one ball
+    updatePlatformsMovement,                          // multiplayer: movement once per tick
+    checkBallPlatforms: (ball) => checkBallPlatformCollisions(ball, null), // then per player
     getSpatialGridStats: () => spatialGrid.stats,
     getNearbyPlatforms: (x, y, width, height) => {
         return spatialGrid.getNearby(x, y, width, height);

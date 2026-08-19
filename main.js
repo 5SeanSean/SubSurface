@@ -1,5 +1,6 @@
 // filepath: /h:/Downloads/PLATZIO/main.js
 import { worldBounds, setupView } from './view.js';
+import { advanceClock, resetClock } from './clock.js';
 import { drawConsumables, updateConsumables } from './consumableEnemies.js';
 import { setupPlatforms } from './platforms.js';
 import { setupLavaSquares } from './lavaSquareEnemies.js';
@@ -79,7 +80,7 @@ function setup() {
     
     const { camera, updateCamera, clearCanvas, drawWithCamera } = setupView(canvas, ctx, ball);
     const { drawLavaSquares, updateLavaSquares, lavaSquares } = 
-        setupLavaSquares(canvas, ctx, ball, endGame, platforms, projectiles, consumables, worldBounds);
+        setupLavaSquares(canvas, ctx, ball, endGame, platformsObj, projectiles, consumables, worldBounds);
     
     // Restart button event listener
     document.getElementById('restartButton').addEventListener('click', restartGame);
@@ -92,6 +93,7 @@ function setup() {
     });
     
     function restartGame() {
+        resetClock();
         resetPlayer();
         lavaSquares.length = 0;
         platformsObj.generatePlatforms();
@@ -141,7 +143,8 @@ function setup() {
     }
     
     function updateGameLogic(deltaTime) {
-        updateConsumables(consumables, ball, projectiles, endGame, platforms, worldBounds, lavaSquares, canvas);
+        advanceClock(deltaTime); // logical time advances one fixed tick per update
+        updateConsumables(consumables, ball, projectiles, endGame, platformsObj, worldBounds, lavaSquares, canvas);
         updateBall();
         handleShooting();
         updateProjectiles();
@@ -158,10 +161,15 @@ function setup() {
 
     
     function draw() {
+        // Score readout is UI — window-scaled here in the render layer, not in the sim.
+        document.getElementById('scoreCounter').innerText =
+            `Score: ${Math.round(ball.score * winSizeConstant)}`;
+
         if (!gameActive) {
-            // Still draw something when game is over
+            // Freeze-frame the death screen with the same camera transform as the live
+            // frame, or the background is mis-positioned and the page shows through.
             clearCanvas();
-            background.draw(camera);
+            drawWithCamera(() => background.draw(camera));
             return;
         }
         
@@ -178,8 +186,9 @@ function setup() {
             drawConsumables(ctx, consumables);
             drawProjectiles();
             drawLavaSquares();
-            lava.draw(ctx);
             drawBall();
+            lava.draw(ctx);
+            
           
             mouseBall(ball, ctx);
             background.drawOverlay(camera);

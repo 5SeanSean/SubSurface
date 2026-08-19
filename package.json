@@ -1,0 +1,13 @@
+{
+  "name": "platz",
+  "version": "0.1.0",
+  "description": "Browser action game with an authoritative multiplayer server.",
+  "type": "module",
+  "scripts": {
+    "server": "node server/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "ws": "^8.21.1"
+  }
+}

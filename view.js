@@ -1,9 +1,13 @@
 // filepath: /h:/Downloads/PLATZIO/view.js
+import { GAME_CONFIG } from './config.js';
+
+// Fixed world bounds (no `window` — must be importable headless in Node and identical
+// for every player). The camera below is the only part that reads the real canvas size.
 export const worldBounds = {
     left: 0,
-    right: window.innerWidth * 3, // Allow movement 3 times the canvas width to the right
+    right: GAME_CONFIG.WORLD_WIDTH,
     top: 0,
-    bottom: window.innerHeight*3
+    bottom: GAME_CONFIG.WORLD_HEIGHT
 };
 
 export function setupView(canvas, ctx, ball) {

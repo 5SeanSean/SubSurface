@@ -1,5 +1,6 @@
 import { ballHarming } from './player.js';
 import { Splash } from './splash.js';
+import { GAME_CONFIG } from './config.js';
 
 export function getRandomLavaColor() {
     let color;
@@ -49,9 +50,9 @@ export function createLava(worldBounds,canvas) {
 
     return {
         x: 0,
-        y: worldBounds.bottom - canvas.height/18,
+        y: worldBounds.bottom - GAME_CONFIG.REF_HEIGHT/18,
         width: worldBounds.right,
-        height: canvas.height/18,
+        height: GAME_CONFIG.REF_HEIGHT/18,
         draw(ctx) {
             ctx.save();
             const gradient = ctx.createLinearGradient(this.x, this.y , this.x, this.y- this.height * 5 );

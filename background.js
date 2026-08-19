@@ -10,8 +10,47 @@ export class Background {
         this.dirtColor = '#6B3E26';
         
         this.streaks = this.generateStreaks();
-        this.topOverlayColor = 'rgba(0, 0, 0, 0.65)'; // Semi-transparent black
-        this.bottomGlowColor = 'rgba(255, 215, 0, 0.8)'; // Semi-transparent gold
+        this.topOverlayColor = 'rgba(0, 0, 0, 0.85)';   // stronger than the old 0.65 (was doubled-up)
+        this.bottomGlowColor = 'rgba(255, 215, 0, 0.95)'; // stronger gold glow
+        // ponytail: dirt+streaks+rocks are static, so bake them into one offscreen buffer
+        // and blit it per frame instead of 600 path/matrix ops. Ceiling: world-sized canvas
+        // (~74MB at 1080p*3). Downscale the buffer if this ever runs on memory-tight devices.
+        this.staticLayer = this.buildStaticLayer();
+    }
+
+    buildStaticLayer() {
+        const w = this.worldBounds.right - this.worldBounds.left;
+        const h = this.worldBounds.bottom - this.worldBounds.top;
+        const c = document.createElement('canvas');
+        c.width = w;
+        c.height = h;
+        const g = c.getContext('2d');
+        g.translate(-this.worldBounds.left, -this.worldBounds.top);
+
+        g.fillStyle = this.dirtColor;
+        g.fillRect(this.worldBounds.left, this.worldBounds.top, w, h);
+
+        this.streaks.forEach(streak => {
+            g.save();
+            g.translate(streak.x, streak.y);
+            g.rotate(streak.angle);
+            g.fillStyle = streak.color;
+            g.fillRect(-streak.width / 2, -streak.height / 2, streak.width, streak.height);
+            g.restore();
+        });
+
+        this.rocks.forEach(rock => {
+            g.beginPath();
+            g.moveTo(rock.points[0].x, rock.points[0].y);
+            for (let i = 1; i < rock.points.length; i++) {
+                g.lineTo(rock.points[i].x, rock.points[i].y);
+            }
+            g.closePath();
+            g.fillStyle = rock.color;
+            g.fill();
+        });
+
+        return c;
     }
     drawOverlay(ball) {
         
@@ -112,43 +151,13 @@ export class Background {
         const offsetX = camera.x * this.parallaxFactor;
         const offsetY = camera.y * this.parallaxFactor;
 
-        // Draw the dirt background
-        this.ctx.save();
-        this.ctx.fillStyle = this.dirtColor;
-        this.ctx.fillRect(
+        // Blit the pre-rendered static layer (dirt + streaks + rocks)
+        this.ctx.drawImage(
+            this.staticLayer,
             this.worldBounds.left - offsetX,
-            this.worldBounds.top - offsetY,
-            this.worldBounds.right - this.worldBounds.left,
-            this.worldBounds.bottom - this.worldBounds.top
+            this.worldBounds.top - offsetY
         );
-        this.ctx.restore();
-        this.ctx.fillStyle = this.streakColor;
-        this.streaks.forEach(streak => {
-            this.ctx.save();
-            this.ctx.translate(streak.x - offsetX, streak.y - offsetY);
-            this.ctx.rotate(streak.angle);
-            this.ctx.fillStyle = streak.color;
-            this.ctx.fillRect(-streak.width / 2, -streak.height / 2, streak.width, streak.height);
-            this.ctx.restore();
-        });
-        // Draw the rocks
-        this.rocks.forEach(rock => {
-            this.ctx.save();
-            this.ctx.translate(-offsetX, -offsetY);
-            this.ctx.beginPath();
-            this.ctx.moveTo(rock.points[0].x, rock.points[0].y);
-            for (let i = 1; i < rock.points.length; i++) {
-                this.ctx.lineTo(rock.points[i].x, rock.points[i].y);
-            }
-            this.ctx.closePath();
-            this.ctx.fillStyle = rock.color;
-            this.ctx.fill();
-            this.ctx.restore();
-            
 
-        });
         this.drawOverlay(camera);
-        this.drawOverlay(camera);
-        
     }
 }
