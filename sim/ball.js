@@ -1,14 +1,8 @@
 // Headless ball (player) simulation — no canvas, no DOM, no rendering.
-// Ported faithfully from player.js's updateBall/updateBallDirection/shoot so the
-// authoritative server and single-player run identical physics.
-//
-// ponytail: player.js still has its own copy of this logic for single-player. Once
-// single-player can be retested in the browser, migrate player.js to import these
-// functions and delete its duplicate — one source of truth. Duplicated now only to
-// avoid changing untested single-player while standing up the server.
+// This is the active simulation for multiplayer and single-player; the browser only
+// renders authoritative snapshots.
 import { GAME_CONFIG } from '../config.js';
 import { physics } from '../physics.js';
-import { now } from '../clock.js';
 
 const H = GAME_CONFIG.REF_HEIGHT;
 
@@ -109,12 +103,15 @@ function applyDirection(ball, input) {
 }
 
 // Fire if the fire button is held and the cooldown has elapsed (logical clock).
-export function tryShoot(ball, input) {
+export function tryShoot(ball, input, currentTime) {
     if (!input.shooting || !ball.isGameRunning) return;
-    if (now() - ball.lastShotTime < ball.fireRate) return;
-    if (ball.currentStock <= 0) return;
+    if (currentTime - ball.lastShotTime < ball.fireRate) return;
+    if (ball.currentStock <= 0) {
+        ball.currentStock = ball.maxStock;
+        return;
+    }
 
-    ball.lastShotTime = now();
+    ball.lastShotTime = currentTime;
     ball.currentStock--;
     ball.radius -= ball.radius / 1000;
     const speed = ball.projSpeed;

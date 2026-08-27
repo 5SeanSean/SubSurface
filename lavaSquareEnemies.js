@@ -1,52 +1,63 @@
 // filepath: /h:/Downloads/PLATZIO/lavaSquare.js
-import { ballHarming } from './player.js';
 import { Splash } from './splash.js';
 import { Consumable } from './consumableEnemies.js';
 import { getRandomLavaColor } from './lava.js';
 import { physics } from './physics.js';
-import { now } from './clock.js';
-import { generalSplashes, cleanupGeneralSplashes } from './splash.js';
+import { generalSplashes } from './splash.js';
 import { textToRGB } from './tools.js';
 import { GAME_CONFIG } from './config.js';
 import { SpatialGrid } from './spatialGrid.js';
 
-// Spatial grid for lava squares collision optimization
-let lavaSpatialGrid = new SpatialGrid(GAME_CONFIG.CELL_SIZE * 2); // Larger cell size for lava squares
-
 export class LavaSquare {
-    constructor(x, y, size, speed, projectileSpeed, shootInterval, worldBounds, canvas, angle, health = 2) {
+    constructor(x, y, size, speed, worldBounds, canvas, angle, health = 2,
+        { spatialGrid = new SpatialGrid(GAME_CONFIG.CELL_SIZE * 2) } = {}) {
         this.x = x;
         this.y = y;
         this.size = size;
         this.speed = speed;
         this.dx = Math.cos(angle) * speed;
         this.dy = Math.sin(angle) * speed;
-        this.projectileSpeed = projectileSpeed;
-        this.shootInterval = shootInterval;
-        this.lastShotTime = 0;
         this.hitCount = 0;
         this.health = health;
         this.color = 'red';
-        this.projectiles = [];
         this.worldBounds = worldBounds;
         this.canvas = canvas;
-        this.lavaRectangles = this.generateLavaRectangles();
+        this.lavaRectangles = canvas ? this.generateLavaRectangles() : [];
         this.splashes = [];
         this.stickColor = getRandomLavaColor();
         this.yPhysics = 0;
         this.xPhysics = 0;
         this.angle = angle;
+        this.armLength = size;
+        this.mouthWidth = size / 6;
+        this.targetRadius = size / 12;
+        this.sucking = false;
+        this.suctionStrength = 0;
         this.id = Math.random().toString(36).substr(2, 9);
         this.needsGridUpdate = true;
+        this.spatialGrid = spatialGrid;
     }
     
     draw(ctx, ball) {
         ctx.save();
         
-        // Draw the stick pointing at the player
-        const stickLength = this.size * ((this.health - (this.hitCount / 3)) / this.health);
+        // The connection stays narrow at the enemy and widens to the player's diameter.
+        const stickLength = this.armLength;
         const stickEndX = this.x + this.size / 2 + stickLength * Math.cos(this.angle);
         const stickEndY = this.y + this.size / 2 + stickLength * Math.sin(this.angle);
+        const mouthX = this.x + this.size / 2 + this.size / 2 * Math.cos(this.angle);
+        const mouthY = this.y + this.size / 2 + this.size / 2 * Math.sin(this.angle);
+        const normalX = -Math.sin(this.angle);
+        const normalY = Math.cos(this.angle);
+        const startHalfWidth = this.mouthWidth / 2;
+        const connectionPath = () => {
+            ctx.beginPath();
+            ctx.moveTo(mouthX + normalX * startHalfWidth, mouthY + normalY * startHalfWidth);
+            ctx.lineTo(stickEndX + normalX * this.targetRadius, stickEndY + normalY * this.targetRadius);
+            ctx.lineTo(stickEndX - normalX * this.targetRadius, stickEndY - normalY * this.targetRadius);
+            ctx.lineTo(mouthX - normalX * startHalfWidth, mouthY - normalY * startHalfWidth);
+            ctx.closePath();
+        };
         const maxOpacity = 1;
         const opacityPerHit = maxOpacity / this.health;
         const currentOpacity = Math.min(this.hitCount * opacityPerHit, maxOpacity);
@@ -54,48 +65,36 @@ export class LavaSquare {
         // Draw splashes
         this.splashes.forEach(splash => splash.draw(ctx));
         
-        // Draw projectiles
-        ctx.save();
-        this.projectiles.forEach(projectile => {
-            // Projectile glow
-            ctx.fillStyle = `rgba(${textToRGB('magma')}, 0.5)`;
-            ctx.shadowColor = 'orange';
-            ctx.shadowBlur = 5;
-            ctx.fillRect(
-                projectile.x - projectile.radius * 1.25,
-                projectile.y - projectile.radius * 1.25,
-                projectile.radius * 2.5,
-                projectile.radius * 2.5
-            );
-            
-            // Projectile core
-            ctx.fillStyle = 'red';
-            ctx.fillRect(
-                projectile.x - projectile.radius * 0.9,
-                projectile.y - projectile.radius * 0.9,
-                projectile.radius * 1.8,
-                projectile.radius * 1.8
-            );
-        });
-        ctx.restore();
-        
-        // Draw stick (shadow)
-        ctx.beginPath();
-        ctx.moveTo(this.x + this.size / 2, this.y + this.size / 2);
-        ctx.lineTo(stickEndX, stickEndY);
-        ctx.strokeStyle = this.stickColor;
-        ctx.lineWidth = this.size / 4;
+        connectionPath();
+        ctx.fillStyle = this.stickColor;
         ctx.shadowColor = this.stickColor;
         ctx.shadowBlur = 10;
+        ctx.globalAlpha = 0.35;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = this.stickColor;
+        ctx.lineWidth = Math.max(2, this.size / 18);
         ctx.stroke();
         
-        // Draw stick (overlay)
-        ctx.beginPath();
-        ctx.moveTo(this.x + this.size / 2, this.y + this.size / 2);
-        ctx.lineTo(stickEndX, stickEndY);
-        ctx.strokeStyle = `rgba(255, 255, 255, ${currentOpacity})`;
-        ctx.lineWidth = this.size / 4;
-        ctx.stroke();
+        connectionPath();
+        ctx.fillStyle = `rgba(255, 255, 255, ${currentOpacity})`;
+        ctx.fill();
+
+        if (this.sucking) {
+            const phase = (performance.now() / 350) % 1;
+            ctx.fillStyle = 'white';
+            for (let i = 0; i < 5; i++) {
+                const distance = this.size / 2 + ((i / 5 - phase + 1) % 1) * (stickLength - this.size / 2);
+                ctx.beginPath();
+                const flowRadius = Math.max(2, (this.mouthWidth / 2 + (this.targetRadius - this.mouthWidth / 2) * distance / stickLength) / 4);
+                ctx.arc(
+                    this.x + this.size / 2 + distance * Math.cos(this.angle),
+                    this.y + this.size / 2 + distance * Math.sin(this.angle),
+                    flowRadius, 0, Math.PI * 2
+                );
+                ctx.fill();
+            }
+        }
         
         // Draw lava square body
         ctx.fillStyle = this.color;
@@ -127,6 +126,7 @@ export class LavaSquare {
     }
     
     shrinkLavaRectangles() {
+        if (!this.canvas) return;
         const shrinkFactor = 1.0001;
         
         for (let i = this.lavaRectangles.length - 1; i >= 0; i--) {
@@ -155,14 +155,14 @@ export class LavaSquare {
     }
     
 update(ball, projectiles, consumables, platforms, endGame, lavaSquares) {
-    // Calculate direction towards player
-    this.angle = Math.atan2(ball.y - this.y - this.size / 2, ball.x - this.x - this.size / 2);
+    this.aimAt(ball);
     
     // Check if destroyed
     if (this.hitCount >= this.health) {
         this.destroy(consumables, ball, lavaSquares);
         return;
     }
+    if (this.sucking) this.eat(ball);
     
     // Update position
     // ponytail: clamp per-frame move to < own size so a fast square can't tunnel
@@ -178,14 +178,14 @@ update(ball, projectiles, consumables, platforms, endGame, lavaSquares) {
     
     // Update spatial grid if position changed
     if (this.needsGridUpdate) {
-        lavaSpatialGrid.update(this, this.x, this.y, this.size, this.size);
+        this.spatialGrid.update(this, this.x, this.y, this.size, this.size);
         this.needsGridUpdate = false;
     }
     
     physics(this);
     
     // Get nearby lava squares for collision detection USING SPATIAL GRID
-    const nearbyLavaSquares = lavaSpatialGrid.getNearby(
+    const nearbyLavaSquares = this.spatialGrid.getNearby(
         this.x, this.y, this.size, this.size
     );
     
@@ -202,12 +202,6 @@ update(ball, projectiles, consumables, platforms, endGame, lavaSquares) {
     // Handle world bounds
     this.handleWorldBounds();
     
-    // Shoot projectiles
-    this.handleShooting(ball);
-    
-    // Update projectiles
-    this.updateProjectiles(platforms, ball); // platforms obj: projectiles query the grid at their own position
-
     this.checkProjectileCollisions(ball);
     
     // Check collision with player
@@ -232,12 +226,12 @@ update(ball, projectiles, consumables, platforms, endGame, lavaSquares) {
         ball.score += this.size;
         
         // Remove from spatial grid
-        lavaSpatialGrid.remove(this);
+        this.spatialGrid.remove(this);
         
         // Remove from lava squares array
         const index = lavaSquares.indexOf(this);
         if (index > -1) {
-            generalSplashes.push(new Splash(
+            if (this.canvas) generalSplashes.push(new Splash(
                 this.x + this.size / 2,
                 this.y - this.size,
                 this.size,
@@ -249,7 +243,6 @@ update(ball, projectiles, consumables, platforms, endGame, lavaSquares) {
         
         // Clean up resources
         this.splashes.forEach(splash => splash.destroy());
-        this.projectiles.length = 0;
         this.lavaRectangles.length = 0;
     }
     
@@ -315,7 +308,7 @@ update(ball, projectiles, consumables, platforms, endGame, lavaSquares) {
                 }
                 
                 // Create splash effect
-                this.splashes.push(new Splash(
+                if (this.canvas) this.splashes.push(new Splash(
                     projectile.x,
                     projectile.y,
                     this.size / 3,
@@ -452,67 +445,37 @@ handleWorldBounds() {
     }
 }
     
-    handleShooting(ball) {
-        const currentTime = now();
-        if (currentTime - this.lastShotTime >= this.shootInterval) {
-            this.shootProjectile(ball);
-            this.lastShotTime = currentTime;
-        }
+    aimAt(ball) {
+        const dx = ball.x - this.x - this.size / 2;
+        const dy = ball.y - this.y - this.size / 2;
+        const distance = Math.hypot(dx, dy);
+        const reach = this.size * 2;
+        const gap = distance - this.size / 2 - ball.radius;
+        this.angle = Math.atan2(dy, dx);
+        this.mouthWidth = this.size / 6;
+        this.sucking = gap <= reach;
+        this.suctionStrength = this.sucking ? 1 - Math.max(0, gap) / reach : 0;
+        this.armLength = this.sucking ? Math.max(this.size / 2, distance - ball.radius) : this.size;
+        this.targetRadius = this.sucking ? ball.radius : this.mouthWidth / 2;
     }
-    
-    updateProjectiles(platformsObj, ball) {
-        for (let i = this.projectiles.length - 1; i >= 0; i--) {
-            const projectile = this.projectiles[i];
 
-            projectile.x += projectile.dx;
-            projectile.y += projectile.dy;
-
-            // Query platforms near the projectile itself, not near the firing enemy
-            const platforms = platformsObj.getNearbyPlatforms(
-                projectile.x, projectile.y, projectile.radius * 2, projectile.radius * 2
-            );
-
-            // Check platform collisions
-            let collided = false;
-            for (const platform of platforms) {
-                if (projectile.x + projectile.radius > platform.x &&
-                    projectile.x - projectile.radius < platform.x + platform.width &&
-                    projectile.y + projectile.radius > platform.y &&
-                    projectile.y - projectile.radius < platform.y + platform.height) {
-                    
-                    this.splashes.push(new Splash(
-                        projectile.x,
-                        projectile.y,
-                        this.size / 3,
-                        'lava',
-                        'square',
-                        platform.dx,
-                        platform.dy
-                    ));
-                    this.projectiles.splice(i, 1);
-                    collided = true;
-                    break;
-                }
-            }
-            
-            if (collided) continue;
-            
-            // Check player collision
-            if (Math.hypot(projectile.x - ball.x, projectile.y - ball.y) < 
-                projectile.radius + ball.radius) {
-                this.splashes.push(new Splash(
-                    projectile.x,
-                    projectile.y,
-                    projectile.radius * 4,
-                    '255,255,255',
-                    'circle'
-                ));
-                ballHarming(ball);
-                this.projectiles.splice(i, 1);
-            }
-        }
+    eat(ball) {
+        if (!this.sucking) return;
+        const deathSize = GAME_CONFIG.REF_HEIGHT / 40;
+        const bite = Math.min(
+            ball.radius - deathSize,
+            GAME_CONFIG.REF_HEIGHT / 30000 * (this.size / (ball.radius * 2)) ** 1.5 *
+                (0.2 + this.suctionStrength * 0.8)
+        );
+        if (bite <= 0) { ball.dead = true; return; }
+        ball.radius -= bite;
+        if (ball.radius <= deathSize) ball.dead = true;
+        this.x -= bite;
+        this.y -= bite;
+        this.size += bite * 2;
+        this.needsGridUpdate = true;
     }
-    
+
     checkPlayerCollision(ball, consumables, lavaSquares) {
         const distance = Math.hypot(
             this.x + this.size / 2 - ball.x,
@@ -525,26 +488,20 @@ handleWorldBounds() {
                 ball.score += this.size * 2;
                 this.destroy(consumables, ball, lavaSquares);
             } else {
-                // Player takes damage
-                ballHarming(ball);
-                this.splashes.push(new Splash(
+                if (this.canvas) this.splashes.push(new Splash(
                     ball.x,
                     ball.y,
                     ball.radius,
                     '255,255,255',
                     'circle'
                 ));
-                ball.dy = 0;
-                ball.dx = 0;
-                ball.yPhysics = (ball.y - (this.y + this.size / 2)) / 4;
-                ball.xPhysics = (ball.x - (this.x + this.size / 2)) / 4;
+                ball.xPhysics += (this.x + this.size / 2 - ball.x) / 500;
+                ball.yPhysics += (this.y + this.size / 2 - ball.y) / 500;
             }
         }
     }
     
     // ---- Multiplayer: target/collide against N players instead of a single ball ----
-    // players is an array of ball objects. Reuses the single-ball collision methods
-    // per player; only homing and enemy-projectile-vs-players need MP-specific loops.
     nearestPlayer(players) {
         let best = null, bd = Infinity;
         for (const p of players) {
@@ -556,13 +513,13 @@ handleWorldBounds() {
 
     stepMP(players, platformsObj, consumables, lavaSquares) {
         const target = this.nearestPlayer(players);
-        if (target) {
-            this.angle = Math.atan2(target.y - this.y - this.size / 2, target.x - this.x - this.size / 2);
-        }
+        if (target) this.aimAt(target);
+        else this.sucking = false;
         if (this.hitCount >= this.health) {
             this.destroy(consumables, target || { score: 0 }, lavaSquares);
             return;
         }
+        if (target && this.sucking) this.eat(target);
 
         // Position with the same anti-tunnel clamp as single-player update()
         const stepX = this.dx + this.xPhysics;
@@ -574,18 +531,16 @@ handleWorldBounds() {
         this.y += stepY * scale;
 
         if (this.needsGridUpdate) {
-            lavaSpatialGrid.update(this, this.x, this.y, this.size, this.size);
+            this.spatialGrid.update(this, this.x, this.y, this.size, this.size);
             this.needsGridUpdate = false;
         }
         physics(this);
 
-        this.checkLavaSquareCollisions(lavaSpatialGrid.getNearby(this.x, this.y, this.size, this.size), lavaSquares);
+        this.checkLavaSquareCollisions(this.spatialGrid.getNearby(this.x, this.y, this.size, this.size), lavaSquares);
         this.checkPlatformCollisions(platformsObj.getNearbyPlatforms(this.x, this.y, this.size, this.size));
         this.handleWorldBounds();
 
-        this.handleShooting();                       // fires toward this.angle (nearest player)
-        this.updateProjectilesMP(platformsObj, players);
-        for (const ball of players) {                // reuse single-ball methods per player
+        for (const ball of players) {
             this.checkProjectileCollisions(ball);
             this.checkPlayerCollision(ball, consumables, lavaSquares);
         }
@@ -593,41 +548,6 @@ handleWorldBounds() {
         this.updateSplashes();
         this.shrinkLavaRectangles();
         if (Math.abs(this.xPhysics) > 0.1 || Math.abs(this.yPhysics) > 0.1) this.needsGridUpdate = true;
-    }
-
-    // Enemy projectiles: move once, ricochet-splash off platforms, damage ANY player.
-    updateProjectilesMP(platformsObj, players) {
-        for (let i = this.projectiles.length - 1; i >= 0; i--) {
-            const projectile = this.projectiles[i];
-            projectile.x += projectile.dx;
-            projectile.y += projectile.dy;
-
-            const platforms = platformsObj.getNearbyPlatforms(
-                projectile.x, projectile.y, projectile.radius * 2, projectile.radius * 2
-            );
-            let collided = false;
-            for (const platform of platforms) {
-                if (projectile.x + projectile.radius > platform.x &&
-                    projectile.x - projectile.radius < platform.x + platform.width &&
-                    projectile.y + projectile.radius > platform.y &&
-                    projectile.y - projectile.radius < platform.y + platform.height) {
-                    this.splashes.push(new Splash(projectile.x, projectile.y, this.size / 3, 'lava', 'square', platform.dx, platform.dy));
-                    this.projectiles.splice(i, 1);
-                    collided = true;
-                    break;
-                }
-            }
-            if (collided) continue;
-
-            for (const ball of players) {
-                if (Math.hypot(projectile.x - ball.x, projectile.y - ball.y) < projectile.radius + ball.radius) {
-                    this.splashes.push(new Splash(projectile.x, projectile.y, projectile.radius * 4, '255,255,255', 'circle'));
-                    ballHarming(ball);
-                    this.projectiles.splice(i, 1);
-                    break;
-                }
-            }
-        }
     }
 
     updateSplashes() {
@@ -638,22 +558,6 @@ handleWorldBounds() {
                 this.splashes.splice(i, 1);
             }
         }
-    }
-    
-    shootProjectile() {
-        const speed = this.projectileSpeed;
-        const dx = speed * Math.cos(this.angle);
-        const dy = speed * Math.sin(this.angle);
-        
-        this.projectiles.push({
-            x: this.x + this.size / 2 + this.size * Math.cos(this.angle),
-            y: this.y + this.size / 2 + this.size * Math.sin(this.angle),
-            radius: 5,
-            dx: dx,
-            dy: dy,
-            shape: 'square',
-            color: getRandomLavaColor()
-        });
     }
     
     generateLavaRectangles() {
@@ -674,78 +578,14 @@ handleWorldBounds() {
     }
     
     reset() {
-        lavaSpatialGrid.remove(this);
+        this.spatialGrid.remove(this);
         this.x = GAME_CONFIG.REF_WIDTH / 4;
         this.y = GAME_CONFIG.REF_HEIGHT / 4;
         this.size = 40;
-        this.projectiles.length = 0;
         this.hitCount = 0;
         this.lavaRectangles = this.generateLavaRectangles();
         this.splashes.forEach(splash => splash.destroy());
         this.splashes.length = 0;
         this.needsGridUpdate = true;
     }
-}
-
-export function setupLavaSquares(canvas, ctx, ball, endGame, platforms, projectiles, consumables, worldBounds) {
-    const lavaSquares = [];
-    let lastSpawnTime = 0;
-    const SPAWN_INTERVAL = 4000;
-    
-    function drawLavaSquares() {
-        ctx.save();
-        lavaSquares.forEach(lavaSquare => lavaSquare.draw(ctx, ball));
-        ctx.restore();
-    }
-    
-    function updateLavaSquares() {
-        // Splash cleanup lives in updateGameLogic (main.js) — don't double it up here.
-        for (let i = lavaSquares.length - 1; i >= 0; i--) {
-            const lavaSquare = lavaSquares[i];
-            lavaSquare.update(ball, projectiles, consumables, platforms, endGame, lavaSquares);
-        }
-    }
-    
-    function spawnLavaSquare() {
-        const currentTime = now();
-        if (currentTime - lastSpawnTime < SPAWN_INTERVAL || 
-            lavaSquares.length >= GAME_CONFIG.MAX_LAVA_SQUARES) {
-            return;
-        }
-        
-        lastSpawnTime = currentTime;
-        
-        const x = Math.random() > 0.5 ? ball.x + 500 : ball.x - 500;
-        const size = Math.random() * (GAME_CONFIG.REF_HEIGHT / 30) + (GAME_CONFIG.REF_HEIGHT / 20);
-        const y = worldBounds.bottom;
-        const speed = Math.random() * GAME_CONFIG.REF_HEIGHT / 700 + GAME_CONFIG.REF_HEIGHT / 700;
-        const projectileSpeed = speed * 1.1;
-        const shootInterval = Math.random() * 1000 + 4000;
-        const angle = Math.random() * Math.PI * 2;
-        
-        const lavaSquare = new LavaSquare(
-            x, y, size, speed, projectileSpeed, shootInterval, 
-            worldBounds, canvas, angle
-        );
-        
-        lavaSquares.push(lavaSquare);
-        lavaSpatialGrid.insert(lavaSquare, lavaSquare.x, lavaSquare.y, lavaSquare.size, lavaSquare.size);
-    }
-    
-    // Use requestAnimationFrame for spawning to sync with game loop
-    function spawnLoop() {
-        if (ball.isGameRunning) {
-            spawnLavaSquare();
-        }
-        requestAnimationFrame(spawnLoop);
-    }
-    
-    spawnLoop();
-    
-    return {
-        drawLavaSquares,
-        updateLavaSquares,
-        lavaSquares,
-        getSpatialGridStats: () => lavaSpatialGrid.stats
-    };
 }

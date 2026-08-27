@@ -1,4 +1,4 @@
-import { ballHarming } from './player.js';
+import { ballHarming } from './damage.js';
 import { Splash } from './splash.js';
 import { GAME_CONFIG } from './config.js';
 

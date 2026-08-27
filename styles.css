@@ -1,10 +1,11 @@
+/* The game is one canvas — menu, forms and lobby are all drawn in-world by client/*Scene.js.
+   The only DOM left is the canvas itself and the score readout. */
 body, html {
     margin: 0;
     padding: 0;
     overflow: hidden;
     background: #000;
     cursor: none;
-
 }
 @font-face {
     font-family: 'boxycool';
@@ -13,32 +14,8 @@ body, html {
 canvas {
     display: block;
 }
-
-/* Overlay styles */
-#gameOverlay {
-    visibility: hidden;
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background-color: rgba(255,0,0, 0.5);
-    z-index: 1000;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-}
-
-/* Restart button styles */
-#restartButton {
-    padding: 100%, 100%;
-    font-size: 1000%;
-    background-color: white;
-    border: none;
-    cursor: pointer;
-    font-family: 'boxycool';
-    user-select: none; /* Disable text selection */
-}
+#gameCanvas { position: fixed; inset: 0; z-index: 0; }
+[hidden] { display: none !important; }
 
 #scoreCounter {
     position: absolute;
@@ -49,16 +26,3 @@ canvas {
     font-family: 'boxycool';
     z-index: 1001;
 }
-
-#fadeOverlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background-color: black;
-    opacity: 1;
-    transition: opacity 2s ease-in-out;
-    pointer-events: none;
-    z-index: 1002;
-  }

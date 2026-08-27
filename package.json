@@ -4,6 +4,7 @@
   "description": "Browser action game with an authoritative multiplayer server.",
   "type": "module",
   "scripts": {
+    "dev": "node server/dev.js",
     "server": "node server/server.js",
     "test": "node --test"
   },

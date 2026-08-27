@@ -1,55 +1,22 @@
 // filepath: /h:/Downloads/PLATZIO/platforms.js
-import { createLava } from './lava.js';
 import { Splash } from './splash.js';
-import { worldBounds } from './view.js';
-import { physics } from './physics.js';
-import { ballHarming } from './player.js';
+import { ballHarming } from './damage.js';
 import { GAME_CONFIG } from './config.js';
 import { SpatialGrid } from './spatialGrid.js';
+import { mulberry32 } from './sim/rng.js';
 
-const genPlatSplashes = [];
-let spatialGrid = new SpatialGrid(GAME_CONFIG.CELL_SIZE);
-
-function destroySplashes(platform, tOrB) {
-    for (let i = 0; i < 3; i++) {
-        const splash = new Splash(
-            platform.x + Math.random() * platform.width,
-            platform.y + tOrB * platform.height,
-            platform.width * platform.height / 300,
-            'grey',
-            'square',
-            Math.random() * platform.width / 5,
-            platform.yPhysics * 3,
-            platform.width / 30
-        );
-        genPlatSplashes.push(splash);
-    }
-    
-    for (let i = 0; i < 3; i++) {
-        const splash = new Splash(
-            platform.x + Math.random() * platform.width,
-            platform.y + tOrB * platform.height,
-            platform.width * platform.height / 300,
-            'grey',
-            'square',
-            Math.random() * -platform.width / 5,
-            platform.yPhysics * 3,
-            platform.width / 30
-        );
-        genPlatSplashes.push(splash);
-    }
-}
-
+// Base platform: geometry, damage state and the splash/debris visuals. Movement lives in
+// subclasses — the base itself never moves, so `dy`/`yPhysics` stay 0 unless a kind sets them.
 class Platform {
-    constructor(x, y, width, height, dx, dy, xPhysics, yPhysics, canvas) {
+    constructor(x, y, width, height, canvas, index = -1) {
         this.x = x;
         this.y = y;
         this.width = width;
         this.height = height;
-        this.dx = dx;
-        this.dy = dy;
-        this.xPhysics = xPhysics;
-        this.yPhysics = yPhysics;
+        this.dx = 0;
+        this.dy = 0;
+        this.xPhysics = 0;
+        this.yPhysics = 0;
         this.hits = 0;
         this.color = '#354859';
         this.hitRectangles = [];
@@ -58,10 +25,14 @@ class Platform {
         this.toRemove = false;
         this.canvas = canvas;
         this.splashes = [];
-        this.id = Math.random().toString(36).substr(2, 9);
+        // Seed-generated platforms carry their generation index, which is how the server
+        // addresses them when syncing damage. Runtime-added ones (menu rock, lobby pads) use -1.
+        this.index = index;
+        this.id = index >= 0 ? `s${index}` : `r${++Platform.runtimeIds}`;
     }
-    
+
     generateSplashes(tOrB) {
+        if (!this.canvas) return;
         for (let i = 0; i < 5; i++) {
             const splash = new Splash(
                 this.x + Math.random() * this.width,
@@ -79,11 +50,6 @@ class Platform {
     
     hitPlatform(tOrB = 1) {
         this.hits++;
-        this.harmssquares = true;
-        
-        setTimeout(() => {
-            this.harmssquares = false;
-        }, 1);
         
         if (this.hits === 1) {
             this.generateHitRectangles(0.5);
@@ -99,6 +65,7 @@ class Platform {
     }
     
     generateHitRectangles(percentage) {
+        if (!this.canvas) return;
         const totalArea = this.width * this.height;
         const areaToFill = totalArea * percentage;
         let filledArea = 0;
@@ -115,79 +82,78 @@ class Platform {
         }
     }
 }
+Platform.runtimeIds = 0;
 
-export function setupPlatforms(canvas, worldBounds) {
-    const maxPlatDY = (GAME_CONFIG.REF_HEIGHT / 1000);
+// The only kind the game uses now. Static: seed-placed, never drifts, never respawns — the
+// arena only ever degrades as platforms are destroyed, which is the round's pressure gradient.
+class StaticPlatform extends Platform {}
+
+export function setupPlatforms(canvas, worldBounds, seed = 1) {
     const platforms = [];
-    
-    function newPlatform() {
-        const platform = new Platform(
-            Math.random() * (worldBounds.right),
-            -30,
-            Math.random() * (worldBounds.right / 25) + (worldBounds.right / 40),
-            Math.random() * (worldBounds.bottom / 170) + (worldBounds.bottom / 90),
-            0,
-            Math.random() * (GAME_CONFIG.REF_HEIGHT / 3000) + (GAME_CONFIG.REF_HEIGHT / 2000),
-            0,
-            0,
-            canvas
-        );
-        platforms.push(platform);
-        spatialGrid.insert(platform, platform.x, platform.y, platform.width, platform.height);
-        return platform;
-    }
-    
-    function genSidePlatX() {
-        let sideX;
-        if (Math.random() > 0.5) {
-            sideX = Math.random() * ((worldBounds.right / 2) - ((worldBounds.right / 25) + (worldBounds.right / 40)) * 2);
-        } else {
-            sideX = Math.random() * ((worldBounds.right / 2) - ((worldBounds.right / 25) + (worldBounds.right / 40))) + 
-                    (worldBounds.right / 25) + (worldBounds.right / 40) + (worldBounds.right / 2);
+    const genPlatSplashes = [];
+    const spatialGrid = new SpatialGrid(GAME_CONFIG.CELL_SIZE);
+    // Destruction is permanent, and state is only broadcast every few ticks — so remember which
+    // seeded platforms are gone rather than deriving it from the live list, which would let a
+    // destruction that happened between broadcasts go unreported and desync the client forever.
+    const destroyed = new Set();
+
+    function destroySplashes(platform, tOrB) {
+        if (!canvas) return;
+        for (const direction of [1, -1]) {
+            for (let i = 0; i < 3; i++) {
+                genPlatSplashes.push(new Splash(
+                    platform.x + Math.random() * platform.width,
+                    platform.y + tOrB * platform.height,
+                    platform.width * platform.height / 300,
+                    'grey',
+                    'square',
+                    Math.random() * direction * platform.width / 5,
+                    platform.yPhysics * 3,
+                    platform.width / 30
+                ));
+            }
         }
-        return sideX;
     }
     
-    function startPlatforms() {
-        const platform = new Platform(
-            genSidePlatX(),
-            Math.random() * (worldBounds.bottom - 100),
-            Math.random() * (worldBounds.right / 25) + (worldBounds.right / 40),
-            Math.random() * (worldBounds.bottom / 170) + (worldBounds.bottom / 90),
-            0,
-            Math.random() * (maxPlatDY - GAME_CONFIG.REF_HEIGHT / 2000) + (GAME_CONFIG.REF_HEIGHT / 2000),
-            0,
-            0,
-            canvas
-        );
-        platforms.push(platform);
-        spatialGrid.insert(platform, platform.x, platform.y, platform.width, platform.height);
-        return platform;
+    // Keeps platforms off the left/right centre line so the middle stays open.
+    function genSidePlatX(rng) {
+        const margin = (worldBounds.right / 25) + (worldBounds.right / 40);
+        if (rng() > 0.5) return rng() * ((worldBounds.right / 2) - margin * 2);
+        return rng() * ((worldBounds.right / 2) - margin) + margin + (worldBounds.right / 2);
     }
-    
+
+    // Deterministic from `seed`: same seed -> same arena on every client and on the server,
+    // which is why platform geometry never has to travel over the network.
     function generatePlatforms() {
+        const rng = mulberry32(seed);
         platforms.length = 0;
         spatialGrid.clear();
-        
+
+        const add = platform => {
+            platforms.push(platform);
+            spatialGrid.insert(platform, platform.x, platform.y, platform.width, platform.height);
+        };
+
         for (let i = 0; i < GAME_CONFIG.PLATFORM_COUNT; i++) {
-            startPlatforms();
+            add(new StaticPlatform(
+                genSidePlatX(rng),
+                GAME_CONFIG.MENU_HEADROOM + rng() * (worldBounds.bottom - 100 - GAME_CONFIG.MENU_HEADROOM),
+                rng() * (worldBounds.right / 25) + (worldBounds.right / 40),
+                rng() * (worldBounds.bottom / 170) + (worldBounds.bottom / 90),
+                canvas, i
+            ));
         }
-        
-        const startPlatform = new Platform(
+        // The wide centre platform you land on out of the menu.
+        add(new StaticPlatform(
             worldBounds.right / 2 - (worldBounds.right / 120),
             worldBounds.bottom / 1.6,
-            (worldBounds.right / 60),
-            (worldBounds.bottom / 30),
-            0,
-            Math.random() * (GAME_CONFIG.REF_HEIGHT / 3000) + (GAME_CONFIG.REF_HEIGHT / 2000),
-            0,
-            0,
-            canvas
-        );
-        platforms.push(startPlatform);
-        spatialGrid.insert(startPlatform, startPlatform.x, startPlatform.y, startPlatform.width, startPlatform.height);
+            worldBounds.right / 60,
+            worldBounds.bottom / 30,
+            canvas, GAME_CONFIG.PLATFORM_COUNT
+        ));
+
     }
-    
+
     function drawPlatforms(ctx) {
         // Draw platform splashes
         if (genPlatSplashes.length > 0) {
@@ -232,90 +198,26 @@ function updatePlatforms(ball) {
     checkBallPlatformCollisions(ball, null);
 }
 
-// Ball-independent platform update: splashes, movement, platform-platform collisions.
+// Ball-independent platform update. Platforms are static now, so this is only debris animation
+// and retiring platforms that combat has destroyed — no drift, no respawn, no platform-platform
+// collisions, and the spatial grid is built once and never moved.
 function updatePlatformsMovement() {
-    // Update platform splashes
     for (let i = genPlatSplashes.length - 1; i >= 0; i--) {
         genPlatSplashes[i].update();
-        if (genPlatSplashes[i].isFinished()) {
-            genPlatSplashes.splice(i, 1);
-        }
+        if (genPlatSplashes[i].isFinished()) genPlatSplashes.splice(i, 1);
     }
-    
-    // Update platforms and rebuild spatial grid
+
     for (let i = platforms.length - 1; i >= 0; i--) {
         const platform = platforms[i];
-        
-        platform.size = platform.height * platform.width;
-        platform.y += (platform.dy + platform.yPhysics);
-        platform.x += (platform.dx + platform.xPhysics);
-        
-        // Update platform in spatial grid
-        spatialGrid.update(platform, platform.x, platform.y, platform.width, platform.height);
-        
-        physics(platform);
-        
-        // Remove platforms that fall out of bounds
-        if (platform.y > worldBounds.bottom) {
-            newPlatform();
-            platform.toRemove = true;
-        }
-        
         if (platform.toRemove) {
+            if (platform.index >= 0) destroyed.add(platform.index);
             spatialGrid.remove(platform);
             platforms.splice(i, 1);
             continue;
         }
-        
-        // Update platform splashes
         for (let j = platform.splashes.length - 1; j >= 0; j--) {
             platform.splashes[j].update();
-            if (platform.splashes[j].isFinished()) {
-                platform.splashes.splice(j, 1);
-            }
-        }
-    }
-    
-    // Check platform-platform collisions using spatial grid
-    checkPlatformPlatformCollisions();
-}
-
-function checkPlatformPlatformCollisions() {
-    // Use spatial grid for platform-platform collisions
-    const allPlatforms = [];
-    spatialGrid.grid.forEach(cell => {
-        cell.forEach(platform => {
-            if (!allPlatforms.includes(platform)) {
-                allPlatforms.push(platform);
-            }
-        });
-    });
-    
-    for (const platform of allPlatforms) {
-        const nearbyPlatforms = spatialGrid.getNearby(
-            platform.x, platform.y, platform.width, platform.height
-        );
-        
-        for (const otherPlatform of nearbyPlatforms) {
-            if (otherPlatform === platform) continue;
-            
-            if (platform.y + platform.height > otherPlatform.y && 
-                platform.y < otherPlatform.y &&
-                ((platform.x > otherPlatform.x && platform.x < otherPlatform.x + otherPlatform.width) ||
-                 (platform.x + platform.width > otherPlatform.x && platform.x + platform.width < otherPlatform.x + otherPlatform.width))) {
-                
-                otherPlatform.y = platform.y + platform.height;
-                const newDY = (platform.dy + otherPlatform.dy) / 2;
-                platform.dy = newDY;
-                otherPlatform.dy = newDY;
-                const newPhysics = (platform.yPhysics + otherPlatform.yPhysics) / 2;
-                platform.yPhysics = newPhysics;
-                otherPlatform.yPhysics = newPhysics;
-                
-                // Update positions in spatial grid
-                spatialGrid.update(platform, platform.x, platform.y, platform.width, platform.height);
-                spatialGrid.update(otherPlatform, otherPlatform.x, otherPlatform.y, otherPlatform.width, otherPlatform.height);
-            }
+            if (platform.splashes[j].isFinished()) platform.splashes.splice(j, 1);
         }
     }
 }
@@ -408,7 +310,7 @@ function checkBallPlatformCollisions(ball, canvas) {
                 } else {
                     if (ball.dy < platform.dy && ball.dy > GAME_CONFIG.REF_HEIGHT / 2000) {
                         ballHarming(ball);
-                        genPlatSplashes.push(new Splash(ball.x, ball.y, ball.radius, 'white'));
+                        if (canvas) genPlatSplashes.push(new Splash(ball.x, ball.y, ball.radius, 'white'));
                     } else {
                         ball.dy = Math.abs(ball.dy / 2) + platform.dy;
                     }
@@ -419,18 +321,66 @@ function checkBallPlatformCollisions(ball, canvas) {
     }
 }
         
+    // Inject/remove a platform that isn't part of the seeded arena (menu rock, lobby pads).
+    // These DO travel over the network, since no client can derive them from the seed.
+    function addPlatform(x, y, width, height) {
+        const platform = new StaticPlatform(x, y, width, height, canvas);
+        platforms.push(platform);
+        spatialGrid.insert(platform, x, y, width, height);
+        return platform;
+    }
+    function removePlatform(platform) {
+        const i = platforms.indexOf(platform);
+        if (i < 0) return;
+        spatialGrid.remove(platform);
+        platforms.splice(i, 1);
+    }
+
+    // --- network sync. Seeded geometry never travels; only what a client can't derive does. ---
+    // Damage to seeded platforms, sparse: [[index, hits], ...]. Usually empty. Includes
+    // already-destroyed ones so a client that missed the destroying frame still catches up.
+    const damage = () => [
+        ...platforms.filter(p => p.index >= 0 && p.hits > 0).map(p => [p.index, p.hits]),
+        ...[...destroyed].map(i => [i, 3])
+    ];
+    // Runtime platforms in full — there are only ever a handful.
+    const extras = () => platforms.filter(p => p.index < 0)
+        .map(p => ({ id: p.id, x: p.x, y: p.y, width: p.width, height: p.height }));
+
+    // Client side: fold the server's damage/extras back onto the locally generated arena.
+    function applySync(damageList = [], extraList = []) {
+        const hitsFor = new Map(damageList);
+        for (let i = platforms.length - 1; i >= 0; i--) {
+            const p = platforms[i];
+            if (p.index < 0) { removePlatform(p); continue; }   // rebuilt from extraList below
+            const hits = hitsFor.get(p.index) ?? 0;
+            if (hits === p.hits) continue;
+            p.hits = hits;
+            p.color = hits >= 2 ? 'grey' : '#354859';
+            if (hits === 1) p.generateHitRectangles(0.5); else p.hitRectangles = [];
+        }
+        // Destroyed platforms are simply absent from the arena once hits hit 3.
+        for (let i = platforms.length - 1; i >= 0; i--) {
+            if (platforms[i].index >= 0 && platforms[i].hits >= 3) removePlatform(platforms[i]);
+        }
+        for (const e of extraList) addPlatform(e.x, e.y, e.width, e.height);
+    }
+
     generatePlatforms();
-return {
-    platforms,
-    drawPlatforms,
-    generatePlatforms,
-    updatePlatforms,                                  // single-player: movement + one ball
-    updatePlatformsMovement,                          // multiplayer: movement once per tick
-    checkBallPlatforms: (ball) => checkBallPlatformCollisions(ball, null), // then per player
-    getSpatialGridStats: () => spatialGrid.stats,
-    getNearbyPlatforms: (x, y, width, height) => {
-        return spatialGrid.getNearby(x, y, width, height);
-    },
-    spatialGrid: spatialGrid // Add this line!
-};
+    return {
+        platforms,
+        addPlatform,
+        removePlatform,
+        drawPlatforms,
+        generatePlatforms,
+        updatePlatforms,                                  // single-player: movement + one ball
+        updatePlatformsMovement,                          // multiplayer: movement once per tick
+        checkBallPlatforms: (ball) => checkBallPlatformCollisions(ball, null), // then per player
+        damage,
+        extras,
+        applySync,
+        getSpatialGridStats: () => spatialGrid.stats,
+        getNearbyPlatforms: (x, y, width, height) => spatialGrid.getNearby(x, y, width, height),
+        spatialGrid
+    };
 }

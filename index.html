@@ -3,18 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Platformer Game</title>
+    <title>Platz</title>
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <canvas id="gameCanvas"></canvas>
-    <div id="scoreCounter">Score: 10</div>
-    <div id="gameOverlay">
-        <button id="restartButton">Restart</button>
-    </div>
-    <div id="fadeOverlay"></div>
-
-    <script type="module" src="main.js"></script>
+    <!-- The whole UI (menu, forms, lobby) is drawn on the canvas by client/*Scene.js. -->
+    <canvas id="gameCanvas" hidden></canvas>
+    <div id="scoreCounter" hidden>Connecting…</div>
+    <script type="module" src="client/boot.js"></script>
 </body>
 
 </html>

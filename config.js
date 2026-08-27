@@ -9,8 +9,12 @@ export const GAME_CONFIG = {
     REF_HEIGHT: 1080,
     WORLD_SCALE: 3,
     // Fixed world size (reference * scale) — shared by all players.
+    // The top MENU_HEADROOM band is kept clear of platforms: the diegetic menu lives there and
+    // you fall out of it into the platform field below. WORLD_HEIGHT is extended by it so the
+    // playable field keeps its original size.
+    MENU_HEADROOM: 1500,
     WORLD_WIDTH: 1920 * 3,
-    WORLD_HEIGHT: 1080 * 3,
+    WORLD_HEIGHT: 1080 * 3 + 1500,
     PLATFORM_COUNT: 60,
     MAX_LAVA_SQUARES: 20,
     PHYSICS_DAMPING: 1.1,

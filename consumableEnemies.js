@@ -1,5 +1,4 @@
 // filepath: /h:/Downloads/PLATZIO/playerConsumables.js
-import { createLava } from "./lava.js";
 import { physics } from "./physics.js";
 import { GAME_CONFIG } from "./config.js";
 export class Consumable {
