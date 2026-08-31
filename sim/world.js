@@ -11,18 +11,18 @@ import { setupPlatforms } from '../platforms.js';
 import { LavaSquare } from '../lavaSquareEnemies.js';
 import { SpatialGrid } from '../spatialGrid.js';
 import { createBall, stepBall, tryShoot, stepProjectiles } from './ball.js';
+import { removeArea } from './playerRanges.js';
+import { mulberry32 } from './rng.js';
+import { LOBBY, lobbyColumnX } from './lobbyLayout.js';
 
 const SPAWN_INTERVAL = 4000;
 const H = GAME_CONFIG.REF_HEIGHT;
-const ALLOWED_KEYS = new Set(['a', 'd', 's', 'w', 'arrowleft', 'arrowright', 'arrowdown', 'arrowup', ' ']);
+const ALLOWED_KEYS = new Set(['a', 'd', 's', 'w', 'q', 'e', 'arrowleft', 'arrowright', 'arrowdown', 'arrowup', ' ']);
 
-// Lobby staging layout: players lower in on a small pad, left-to-right in join order,
-// the host (index 0) centered, each pad stopping at a common resting level.
-const LOBBY_Y = worldBounds.bottom * 0.42;   // resting top-of-pad level
-const LOBBY_X0 = worldBounds.right / 2;       // host column (centered)
-const LOBBY_DX = H * 0.85;                     // horizontal gap between players
-const LOBBY_DROP = H * 2.5;                     // how far above the rest level a pad starts
-const LOBBY_SPEED = H / 130;                    // descent per tick
+// Lobby staging layout lives in sim/lobbyLayout.js (shared with the client). The host stays on
+// the menu pad; three empty guest pads and the divider lower in when the lobby is created.
+const LOBBY_Y = LOBBY.restY;
+const LOBBY_DROP = LOBBY.drop;
 
 export function createWorld({ mode = 'coop', lobby = false, seed = 1, canvas = null } = {}) {
     const platformsObj = setupPlatforms(canvas, worldBounds, seed); // null canvas: server never draws
@@ -35,39 +35,91 @@ export function createWorld({ mode = 'coop', lobby = false, seed = 1, canvas = n
     let time = 0;
     let peaceful = false;   // menu: real ball rests, but no enemies spawn
 
-    const lobbyPads = new Map(); // id -> descending pad platform
-    const descending = new Set(); // ids still lowering in
+    // Enemy stream, seeded separately from the platform stream so the two can't shift each
+    // other. Every spawn (position, size, speed, angle, colour, id) is reproducible from `seed`.
+    const rng = mulberry32((seed ^ 0x9E3779B9) >>> 0);
+    let enemySeq = 0;
 
-    // Lobby: a calm shared arena — no auto-generated level, no enemies. Players arrive via
-    // addLobbyPlayer and lower in on their own pad.
+    const lobbyPads = [];          // four persistent staging pads, populated as players join
+    const playerSlots = new Map(); // player id -> slot index
+    const lobbyMotions = [];
+    const lobbyFixtures = [];
+
+    // Separate seeded stream: lobby timing changes never perturb arena/enemy generation.
+    const lobbyRng = mulberry32((seed ^ 0x51F15EED) >>> 0);
+    const smoothstep = t => t * t * (3 - 2 * t);
+    function addLobbyMotion(plat, targetY) {
+        lobbyMotions.push({
+            plat, fromY: plat.y, targetY, elapsed: 0,
+            delay: lobbyRng() * LOBBY.motionDelayMs,
+            duration: LOBBY.motionMs + lobbyRng() * LOBBY.motionJitterMs,
+            dip: LOBBY.dip * (0.75 + lobbyRng() * 0.5),
+            rebound: LOBBY.rebound * (0.75 + lobbyRng() * 0.5)
+        });
+    }
+
+    // Lobby: a calm shared arena — no auto-generated level and no enemies. All pads exist from
+    // creation; only the host pad is already in place, while the empty guest pads descend.
     if (lobby) {
         peaceful = true;
         platformsObj.platforms.length = 0;
         platformsObj.spatialGrid.clear();
+        for (let i = 0; i < 4; i++) {
+            const x = lobbyColumnX(i);
+            const y = i === 0 ? LOBBY_Y : LOBBY_Y - LOBBY_DROP;
+            lobbyPads.push(platformsObj.addPlatform(x - LOBBY.padW / 2, y, LOBBY.padW, LOBBY.padH));
+            if (i > 0) addLobbyMotion(lobbyPads[i], LOBBY_Y);
+        }
+        for (const f of LOBBY.fixtures) {
+            const plat = platformsObj.addPlatform(f.x, f.y - LOBBY_DROP, f.w, f.h);
+            lobbyFixtures.push({ plat, targetY: f.y });
+            addLobbyMotion(plat, f.y);
+        }
     }
 
     const emptyInput = () => ({ keys: new Set(), shooting: false, jump: false, aim: 0 });
     const balls = () => [...players.values()].map(p => p.ball);
 
-    function addPlayer(id) {
-        players.set(id, { ball: createBall(id, worldBounds), input: emptyInput() });
+    function addPlayer(id, spawn = null) {
+        const ball = createBall(id, worldBounds);
+        if (spawn) Object.assign(ball, spawn, { id, projectiles: [] });
+        players.set(id, { ball, input: emptyInput() });
     }
-    // Add a player who lowers in on a pad at slot `index` (0 = host, centered).
+    // Populate one of the pads that already belongs to the lobby.
     function addLobbyPlayer(id, index = players.size) {
         addPlayer(id);
         const b = players.get(id).ball;
-        const padW = b.radius * 3, padH = H / 45;
-        const x = LOBBY_X0 + index * LOBBY_DX;
-        const pad = platformsObj.addPlatform(x - padW / 2, LOBBY_Y - LOBBY_DROP, padW, padH);
-        b.x = x; b.y = pad.y - b.radius; b.dx = b.dy = 0; b.isGameRunning = false;
-        lobbyPads.set(id, pad);
-        descending.add(id);
+        const slot = Math.max(0, Math.min(index, lobbyPads.length - 1));
+        const pad = lobbyPads[slot];
+        playerSlots.set(id, slot);
+        b.x = pad.x + pad.width / 2;
+        // The host already occupied this platform on the preceding menu screen. Only guests
+        // enter physically from above; slot zero begins exactly at rest.
+        b.y = slot === 0 ? pad.y - b.radius : b.radius;
+        b.dx = b.dy = 0;
+        b.isGameRunning = true;
     }
     function removePlayer(id) {
         players.delete(id);
-        const pad = lobbyPads.get(id);
-        if (pad) { platformsObj.removePlatform(pad); lobbyPads.delete(id); }
-        descending.delete(id);
+        playerSlots.delete(id);
+    }
+
+    // Compact the live staging players back into join order after somebody leaves. In
+    // particular, the next host moves onto slot zero so they can reach the START control.
+    function reassignLobbySlots(ids) {
+        if (!lobby) return;
+        playerSlots.clear();
+        ids.forEach((id, index) => {
+            const b = players.get(id)?.ball;
+            const slot = Math.max(0, Math.min(index, lobbyPads.length - 1));
+            const pad = lobbyPads[slot];
+            if (!b || !pad) return;
+            playerSlots.set(id, slot);
+            b.x = pad.x + pad.width / 2;
+            b.y = pad.y - b.radius;
+            b.dx = b.dy = 0;
+            b.isGameRunning = true;
+        });
     }
 
     function setInput(id, msg) {
@@ -84,13 +136,13 @@ export function createWorld({ mode = 'coop', lobby = false, seed = 1, canvas = n
         if (time - lastSpawn < SPAWN_INTERVAL || lavaSquares.length >= GAME_CONFIG.MAX_LAVA_SQUARES) return;
         if (players.size === 0) return;
         lastSpawn = time;
-        const near = balls()[Math.floor(Math.random() * players.size)]; // spawn beside a random player
-        const x = Math.random() > 0.5 ? near.x + 500 : near.x - 500;
-        const size = Math.random() * (H / 30) + (H / 20);
-        const speed = Math.random() * H / 700 + H / 700;
-        const angle = Math.random() * Math.PI * 2;
+        const near = balls()[Math.floor(rng() * players.size)]; // spawn beside a random player
+        const x = rng() > 0.5 ? near.x + 500 : near.x - 500;
+        const size = rng() * (H / 30) + (H / 20);
+        const speed = rng() * H / 700 + H / 700;
+        const angle = rng() * Math.PI * 2;
         lavaSquares.push(new LavaSquare(x, worldBounds.bottom, size, speed,
-            worldBounds, null, angle, 2, { spatialGrid: enemyGrid }));
+            worldBounds, canvas, angle, 1, { spatialGrid: enemyGrid, rng, id: `e${++enemySeq}` }));
     }
 
     function tick(dt) {
@@ -98,21 +150,35 @@ export function createWorld({ mode = 'coop', lobby = false, seed = 1, canvas = n
         const deadPlayerIds = [];
         platformsObj.updatePlatformsMovement();
 
-        // Lobby descent: carry each lowering player down on their pad until it reaches the rest level.
-        for (const id of [...descending]) {
-            const pad = lobbyPads.get(id), b = players.get(id).ball;
-            pad.y = Math.min(LOBBY_Y, pad.y + LOBBY_SPEED);
-            b.x = pad.x + pad.width / 2; b.y = pad.y - b.radius; b.dx = b.dy = 0;
-            if (pad.y >= LOBBY_Y) { descending.delete(id); b.isGameRunning = true; }
+        // Smooth seeded keyframes: descend, dip below rest, rebound above it, then settle.
+        for (let i = lobbyMotions.length - 1; i >= 0; i--) {
+            const m = lobbyMotions[i];
+            m.elapsed += dt;
+            const p = Math.max(0, Math.min(1, (m.elapsed - m.delay) / m.duration));
+            let y;
+            if (p < 0.72) {
+                const t = smoothstep(p / 0.72);
+                y = m.fromY + (m.targetY + m.dip - m.fromY) * t;
+            } else if (p < 0.88) {
+                const t = smoothstep((p - 0.72) / 0.16);
+                y = m.targetY + m.dip + (m.targetY - m.rebound - (m.targetY + m.dip)) * t;
+            } else {
+                const t = smoothstep((p - 0.88) / 0.12);
+                y = m.targetY - m.rebound + m.rebound * t;
+            }
+            m.plat.dy = y - m.plat.y;
+            m.plat.y = y;
+            platformsObj.spatialGrid.update(m.plat, m.plat.x, m.plat.y, m.plat.width, m.plat.height);
+            if (p >= 1) { m.plat.dy = 0; lobbyMotions.splice(i, 1); }
         }
 
         for (const [pid, p] of players) {
-            if (descending.has(pid)) continue;   // frozen while lowering in
-            stepBall(p.ball, p.input, worldBounds);
+            const previous = { x: p.ball.x, y: p.ball.y };
+            stepBall(p.ball, p.input, worldBounds, dt);
             p.input.jump = false;
             tryShoot(p.ball, p.input, time);
             stepProjectiles(p.ball, platformsObj, worldBounds);
-            platformsObj.checkBallPlatforms(p.ball);
+            platformsObj.checkBallPlatforms(p.ball, previous);
             if (p.ball.y > lavaY) p.ball.radius /= 1.01;
         }
 
@@ -136,6 +202,57 @@ export function createWorld({ mode = 'coop', lobby = false, seed = 1, canvas = n
         return deadPlayerIds;
     }
 
+    // Host-gated start: true if player `id`'s projectile is overlapping the START button (which
+    // sits on the host's side of the wall). The projectile is consumed so one shot begins one
+    // round. The server only ever calls this for the host during staging.
+    function checkStartHit(id) {
+        const p = players.get(id);
+        if (!p) return false;
+        const b = LOBBY.startBtn;
+        for (let i = p.ball.projectiles.length - 1; i >= 0; i--) {
+            const pr = p.ball.projectiles[i];
+            if (pr.x + pr.radius > b.x && pr.x - pr.radius < b.x + b.w &&
+                pr.y + pr.radius > b.y && pr.y - pr.radius < b.y + b.h) {
+                p.ball.projectiles.splice(i, 1);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Consume guest attempts that reach either the divider or START itself. Layout changes can
+    // make one path possible without the other, but both should trigger the alternate messages.
+    function checkGuestBlockHit(hostId) {
+        const start = LOBBY.startBtn;
+        for (const [id, player] of players) {
+            if (id === hostId) continue;
+            for (let i = player.ball.projectiles.length - 1; i >= 0; i--) {
+                const pr = player.ball.projectiles[i];
+                const hitDivider = lobbyFixtures.some(({ plat }) =>
+                    pr.x + pr.radius > plat.x && pr.x - pr.radius < plat.x + plat.width &&
+                    pr.y + pr.radius > plat.y && pr.y - pr.radius < plat.y + plat.height);
+                const hitStart =
+                    pr.x + pr.radius > start.x && pr.x - pr.radius < start.x + start.w &&
+                    pr.y + pr.radius > start.y && pr.y - pr.radius < start.y + start.h;
+                if (!hitDivider && !hitStart) continue;
+                player.ball.projectiles.splice(i, 1);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Start is a visible world event: remove every staging surface together, then let the same
+    // authoritative balls fall while the server prepares the seeded arena.
+    function breakLobbyPlatforms() {
+        for (const pad of lobbyPads) platformsObj.removePlatform(pad);
+        for (const fixture of lobbyFixtures) platformsObj.removePlatform(fixture.plat);
+        lobbyPads.length = 0;
+        lobbyFixtures.length = 0;
+        lobbyMotions.length = 0;
+        for (const { ball } of players.values()) ball.isGameRunning = true;
+    }
+
     function checkPlayerProjectileHits() {
         for (const [ownerId, owner] of players) {
             for (let i = owner.ball.projectiles.length - 1; i >= 0; i--) {
@@ -144,8 +261,9 @@ export function createWorld({ mode = 'coop', lobby = false, seed = 1, canvas = n
                     if (targetId === ownerId) continue;
                     if (Math.hypot(projectile.x - target.ball.x, projectile.y - target.ball.y) >=
                         projectile.radius + target.ball.radius) continue;
-                    target.ball.radius /= 1.01;
-                    owner.ball.score += 0.5;
+                    target.ball.radius = removeArea(target.ball.radius,
+                        projectile.damage ?? projectile.radius * projectile.radius);
+                    owner.ball.score += projectile.enemyDamage ?? 0.5;
                     owner.ball.projectiles.splice(i, 1);
                     break;
                 }
@@ -208,15 +326,18 @@ export function createWorld({ mode = 'coop', lobby = false, seed = 1, canvas = n
                 id: ball.id, x: ball.x, y: ball.y, radius: ball.radius,
                 dx: ball.dx, dy: ball.dy, angle: ball.angle, score: ball.score,
                 currentStock: ball.currentStock, maxStock: ball.maxStock, strength: ball.strength,
-                projectiles: ball.projectiles.map(p => ({ x: p.x, y: p.y, radius: p.radius }))
+                shotRange: ball.shotRange,
+                projectiles: ball.projectiles.map(p => ({
+                    id: p.id, x: p.x, y: p.y, radius: p.radius, shotRange: p.shotRange
+                }))
             })),
             platforms: platformsObj.platforms.map(pl => ({
-                x: pl.x, y: pl.y, width: pl.width, height: pl.height, color: pl.color
+                x: pl.x, y: pl.y, width: pl.width, height: pl.height, color: pl.color,
+                hitRectangles: pl.hitRectangles
             })),
             enemies: lavaSquares.map(s => ({
-                id: s.id, x: s.x, y: s.y, size: s.size, angle: s.angle, stickColor: s.stickColor,
-                hitCount: s.hitCount, health: s.health, armLength: s.armLength, mouthWidth: s.mouthWidth,
-                targetRadius: s.targetRadius, sucking: s.sucking
+                id: s.id, x: s.x, y: s.y, size: s.size, angle: s.angle,
+                hitCount: s.hitCount, health: s.health
             })),
             consumables: consumables.map(c => ({ x: c.x, y: c.y, size: c.size, shape: c.shape, color: c.color })),
             lavaY
@@ -232,7 +353,8 @@ export function createWorld({ mode = 'coop', lobby = false, seed = 1, canvas = n
     }
 
     return {
-        addPlayer, addLobbyPlayer, removePlayer, setInput, tick, snapshot, netSnapshot, players, mode, seed,
+        addPlayer, addLobbyPlayer, removePlayer, reassignLobbySlots, setInput, tick, snapshot, netSnapshot, players, mode, seed,
+        checkStartHit, checkGuestBlockHit, breakLobbyPlatforms,
         setPeaceful: v => { peaceful = v; },
         addPlatform: (x, y, w, h) => platformsObj.addPlatform(x, y, w, h),
         removePlatform: p => platformsObj.removePlatform(p)

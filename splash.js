@@ -1,4 +1,4 @@
-// filepath: /h:/Downloads/PLATZIO/splash.js
+// filepath: /h:/Downloads/SUBSURFACE/splash.js
 import { textToRGB } from './tools.js';
 import { getRandomLavaColor } from './lava.js';
 import { physics } from './physics.js';

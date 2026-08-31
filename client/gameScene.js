@@ -4,11 +4,12 @@
 import { GAME_CONFIG } from '../config.js';
 import { Splash } from '../splash.js';
 import { createInput } from './input.js';
+import { createPauseMenu } from './pauseMenu.js';
 
 const WORLD_W = GAME_CONFIG.WORLD_WIDTH;
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(v, hi));
 
-export function createGameScene(stage, { seedX = null, seedY = null } = {}) {
+export function createGameScene(stage, { seedX = null, seedY = null, onExit = null } = {}) {
     const id = 1;
     // The menu already added the real ball resting on its platform; reuse it so the fall is continuous.
     if (!stage.world.players.has(id)) {
@@ -20,8 +21,11 @@ export function createGameScene(stage, { seedX = null, seedY = null } = {}) {
         b.dy = 0;
     }
     stage.world.setPeaceful(false);   // enemies resume now that the game is on
-    const ball = stage.world.players.get(id).ball;
-    stage.camera.setTarget(() => ball, { snap: true });
+    // Resolved fresh each time: the world REPLACES p.ball on death, so a captured reference
+    // would leave the camera and score watching the corpse of the previous life forever.
+    const ballOf = () => stage.world.players.get(id)?.ball ?? null;
+    const ball = ballOf();
+    stage.camera.setTarget(ballOf, { ease: 0.1 });
 
     // Debris where the platform shattered.
     const splashes = [];
@@ -30,12 +34,29 @@ export function createGameScene(stage, { seedX = null, seedY = null } = {}) {
             (Math.random() - 0.5) * 22, 10, 6));
     }
 
-    const input = createInput();
+    // Esc pauses; Esc again backs out of the pause menu. Input is locked while it is open so
+    // the ball doesn't keep playing behind the overlay.
+    const pause = createPauseMenu(stage, [
+        { label: 'Resume', action: () => input.unlock() },
+        ...(onExit ? [{ label: 'Main Menu', action: () => onExit() }] : [])
+    ]);
+    const input = createInput({
+        onKey: k => {
+            if (k !== 'escape') return;
+            if (pause.toggle()) input.lock(); else input.unlock();
+            return false;
+        }
+    });
+    const onMouseDown = () => pause.click();
+    window.addEventListener('mousedown', onMouseDown);
+
     const scoreCounter = document.getElementById('scoreCounter');
     scoreCounter.hidden = false;
 
     function update() {
-        const aim = Math.atan2((stage.pointer.y + stage.cam.y) - ball.y, (stage.pointer.x + stage.cam.x) - ball.x);
+        const b = ballOf();
+        if (!b) return;
+        const aim = Math.atan2((stage.pointer.y + stage.cam.y) - b.y, (stage.pointer.x + stage.cam.x) - b.x);
         stage.world.setInput(id, { ...input.read(), aim });
         for (let i = splashes.length - 1; i >= 0; i--) {
             splashes[i].update();
@@ -50,11 +71,16 @@ export function createGameScene(stage, { seedX = null, seedY = null } = {}) {
             for (const s of splashes) s.draw(ctx);
             ctx.restore();
         }
-        scoreCounter.textContent = `Score: ${Math.round(ball.score)}`;
+        scoreCounter.textContent = `Score: ${Math.round(ballOf()?.score ?? 0)}`;
+        pause.draw(ctx);
     }
 
     return {
         myId: id, update, draw,
-        dispose() { input.dispose(); scoreCounter.hidden = true; }
+        dispose() {
+            input.dispose();
+            window.removeEventListener('mousedown', onMouseDown);
+            scoreCounter.hidden = true;
+        }
     };
 }

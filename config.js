@@ -1,4 +1,4 @@
-// filepath: /h:/Downloads/PLATZIO/config.js
+// filepath: /h:/Downloads/SUBSURFACE/config.js
 export const GAME_CONFIG = {
     TICK_RATE: 120,
     TICK_DURATION: 1000 / 120,

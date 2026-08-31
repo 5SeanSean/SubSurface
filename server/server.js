@@ -8,13 +8,14 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { GAME_CONFIG } from '../config.js';
 import { createWorld } from '../sim/world.js';
 import { hashSeed } from '../sim/rng.js';
+import { LOBBY } from '../sim/lobbyLayout.js';
 
 const BROADCAST_EVERY = 4;
 const MAX_PLAYERS = 4;
 const GHOST_MAX_RESPAWNS = 3;   // coop: a disconnected player respawns this many times, then fully dies
 const MAX_LOBBIES = 100;
-// Round cycle: players lower in during staging, fight the round, then results before the next one.
-const STAGING_MS = 4000;
+// Round cycle: players lower in during staging and wait there until the HOST shoots START, fight
+// the round, then results before the next one stages.
 const OVER_MS = 5000;
 const LIVES = 3;
 const PUMP_MS = 4;              // timer period; the accumulator decides how many fixed ticks run
@@ -126,7 +127,7 @@ export function createGameServer({
     const lobbyMessage = lobby => ({
         t: 'lobby', lobby: lobby.id, mode: lobby.mode, status: lobby.status, hostId: lobby.hostId,
         round: lobby.round, seed: lobby.world?.seed ?? 0, phaseMs: Math.max(0, lobby.phaseMs),
-        winnerId: lobby.winnerId ?? null,
+        winnerId: lobby.winnerId ?? null, buttonTaunt: lobby.buttonTaunt ?? null,
         players: lobby.joinOrder.map(id => {
             const { name, lives, eliminated, disconnected, spectating } = lobby.clients.get(id);
             return { id, name, lives, eliminated, disconnected, spectating };
@@ -149,21 +150,27 @@ export function createGameServer({
         lobby.world?.removePlayer(id);
         if (lobby.clients.size === 0) { lobby.world = null; lobbies.delete(lobby.id); return; }
         lobby.hostId = liveHost(lobby);
+        if (lobby.status === 'staging') lobby.world?.reassignLobbySlots(lobby.joinOrder);
         broadcastLobby(lobby);
+        if (lobby.world) broadcast(lobby, { t: 'state', ...lobby.world.netSnapshot() });
         checkRoundOver(lobby);
     }
 
-    // ---- round cycle: staging -> playing -> over -> staging ----
+    // ---- round cycle: staging -> starting (pads break) -> playing -> over -> staging ----
     // Each round gets its own seed, so every round is a fresh arena that clients generate
     // locally from the seed rather than receiving.
-    const roundSeed = lobby => hashSeed(`${lobby.id}:${lobby.round}`);
+    // The lobby's NAME is its seed: round 1 is exactly the world that name denotes, which is the
+    // world the host was already standing in. Later rounds derive fresh arenas from the same name.
+    const roundSeed = lobby => lobby.round <= 1 ? lobby.baseSeed : hashSeed(`${lobby.id}:${lobby.round}`);
 
     // Staging: a calm, arena-free world where each player lowers in on their own pad.
     function toStaging(lobby) {
         lobby.round++;
         lobby.status = 'staging';
-        lobby.phaseMs = STAGING_MS;
+        lobby.phaseMs = Infinity;   // staging holds until the host shoots START
         lobby.winnerId = null;
+        lobby.buttonTaunt = null;
+        lobby.buttonTauntMs = 0;
         lobby.world = createWorld({ mode: lobby.mode, lobby: true, seed: roundSeed(lobby) });
         lobby.joinOrder.forEach((id, i) => {
             const client = lobby.clients.get(id);
@@ -176,16 +183,31 @@ export function createGameServer({
         broadcastLobby(lobby);
     }
 
-    // Playing: the real seeded arena. Static platforms only degrade, so the round self-terminates.
-    function toPlaying(lobby) {
-        // pvp with nobody to fight would end the instant it began — hold in staging instead.
+    function toStarting(lobby) {
+        // pvp with nobody to fight would end the instant it began — the host's START does nothing
+        // until there are enough contenders, so just stay in staging.
         const contenders = lobby.joinOrder.filter(id => !lobby.clients.get(id).spectating).length;
-        if (contenders < (lobby.mode === 'pvp' ? 2 : 1)) { lobby.phaseMs = STAGING_MS; return; }
+        if (contenders < (lobby.mode === 'pvp' ? 2 : 1)) return;
+        lobby.status = 'starting';
+        lobby.phaseMs = LOBBY.breakMs;
+        lobby.world.breakLobbyPlatforms();
+        broadcastLobby(lobby);
+    }
+
+    // Playing: preserve each falling ball's position and velocity when the seeded arena replaces
+    // the staging set, so the break reads as one continuous fall instead of a scene teleport.
+    function toPlaying(lobby) {
+        const entry = new Map(lobby.joinOrder.map(id => {
+            const b = lobby.world.players.get(id)?.ball;
+            return [id, b ? {
+                x: b.x, y: b.y, dx: b.dx, dy: b.dy, angle: b.angle, shotRange: b.shotRange
+            } : null];
+        }));
         lobby.status = 'playing';
         lobby.phaseMs = Infinity;
         lobby.world = createWorld({ mode: lobby.mode, seed: roundSeed(lobby) });
         for (const id of lobby.joinOrder) {
-            if (!lobby.clients.get(id).spectating) lobby.world.addPlayer(id);
+            if (!lobby.clients.get(id).spectating) lobby.world.addPlayer(id, entry.get(id));
         }
         broadcastLobby(lobby);
     }
@@ -217,10 +239,11 @@ export function createGameServer({
             lobby = {
                 id: info.lobbyId, mode: info.mode, status: 'staging', hostId: null,
                 world: null, clients: new Map(), joinOrder: [],
-                round: 0, phaseMs: STAGING_MS, winnerId: null
+                round: 1, phaseMs: Infinity, winnerId: null,
+                buttonTaunt: null, buttonTauntMs: 0, tauntIndex: 0,
+                baseSeed: hashSeed(info.lobbyId)
             };
-            lobby.world = createWorld({ mode: info.mode, lobby: true, seed: hashSeed(`${lobby.id}:1`) });
-            lobby.round = 1;
+            lobby.world = createWorld({ mode: info.mode, lobby: true, seed: roundSeed(lobby) });
             lobbies.set(lobby.id, lobby);
             ensureTimer();
         } else if (!lobby) {
@@ -239,7 +262,7 @@ export function createGameServer({
             lobby.hostId = liveHost(lobby);
             send(ws, { t: 'welcome', id, lobby: lobby.id });
             broadcastLobby(lobby);
-            console.log(`[platz] ${info.name} (${id}) reconnected to ${lobby.id}`);
+            console.log(`[subsurface] ${info.name} (${id}) reconnected to ${lobby.id}`);
         } else {
             if (lobby.clients.size >= MAX_PLAYERS) return ws.close(4403, 'Lobby is full');
             if ([...lobby.clients.values()].some(c => c.name.toLowerCase() === info.name.toLowerCase())) {
@@ -260,7 +283,7 @@ export function createGameServer({
             if (!spectating) lobby.world.addLobbyPlayer(id, lobby.joinOrder.length - 1);
             send(ws, { t: 'welcome', id, lobby: lobby.id });
             broadcastLobby(lobby);
-            console.log(`[platz] ${info.name} (${id}) joined ${lobby.id} (${lobby.clients.size} online)`);
+            console.log(`[subsurface] ${info.name} (${id}) joined ${lobby.id} (${lobby.clients.size} online)`);
         }
 
         ws.on('message', data => {
@@ -276,11 +299,16 @@ export function createGameServer({
 
             if (msg?.t === 'input' && lobby.world && !client.eliminated) {
                 lobby.world.setInput(id, msg);
+            } else if (msg?.t === 'leave') {
+                fullyRemove(lobby, id);
+                console.log(`[subsurface] ${info.name} (${id}) left ${lobby.id} (${lobby.clients.size} online)`);
+                ws.close(1000, 'Left lobby');
             }
         });
 
         ws.on('close', () => {
             if (client.ws !== ws) return;   // stale socket replaced by a reconnect — ignore
+            if (!lobby.clients.has(id)) return; // graceful leave was already removed and broadcast
             // Mid-game: leave the player in the world as a frozen ghost that keeps respawning
             // until it fully dies (pvp: lives run out; coop: GHOST_MAX_RESPAWNS). Same cid rejoins it.
             if (!client.eliminated && lobby.world?.players.has(id)) {
@@ -293,11 +321,11 @@ export function createGameServer({
                 } else {
                     broadcastLobby(lobby);
                 }
-                console.log(`[platz] ${info.name} (${id}) disconnected from ${lobby.id} (ghost)`);
+                console.log(`[subsurface] ${info.name} (${id}) disconnected from ${lobby.id} (ghost)`);
                 return;
             }
             fullyRemove(lobby, id);
-            console.log(`[platz] ${info.name} (${id}) left ${lobby.id} (${lobby.clients.size} online)`);
+            console.log(`[subsurface] ${info.name} (${id}) left ${lobby.id} (${lobby.clients.size} online)`);
         });
         ws.on('error', () => {});
     });
@@ -339,12 +367,27 @@ export function createGameServer({
             // matter what removed the last player (death, disconnect, kick).
             checkRoundOver(lobby);
 
-            // Phase clock. staging auto-begins the round; over auto-returns to staging.
-            lobby.phaseMs -= GAME_CONFIG.TICK_DURATION;
-            if (lobby.phaseMs <= 0) {
-                if (lobby.status === 'staging') toPlaying(lobby);
-                else if (lobby.status === 'over') toStaging(lobby);
+            if (lobby.status === 'staging') {
+                if (lobby.world.checkGuestBlockHit(lobby.hostId)) {
+                    const taunts = ['TRY AGAIN', 'HA HA', 'HOST ONLY'];
+                    lobby.buttonTaunt = taunts[lobby.tauntIndex++ % taunts.length];
+                    lobby.buttonTauntMs = 1000;
+                    broadcastLobby(lobby);
+                }
+                if (lobby.world.checkStartHit(lobby.hostId)) toStarting(lobby);
+                if (lobby.buttonTauntMs > 0) {
+                    lobby.buttonTauntMs -= GAME_CONFIG.TICK_DURATION;
+                    if (lobby.buttonTauntMs <= 0) {
+                        lobby.buttonTaunt = null;
+                        broadcastLobby(lobby);
+                    }
+                }
             }
+
+            // Phase clock. Staging has no clock; starting completes the visible break/fall.
+            lobby.phaseMs -= GAME_CONFIG.TICK_DURATION;
+            if (lobby.phaseMs <= 0 && lobby.status === 'starting') toPlaying(lobby);
+            if (lobby.phaseMs <= 0 && lobby.status === 'over') toStaging(lobby);
         }
         if (++ticks % BROADCAST_EVERY === 0) {
             for (const lobby of lobbies.values()) {
@@ -364,7 +407,7 @@ export function createGameServer({
         timer = setInterval(pumpLobbies, PUMP_MS);
     }
 
-    server.listen(port, () => console.log(`[platz] authoritative server listening on port ${server.address().port}`));
+    server.listen(port, () => console.log(`[subsurface] authoritative server listening on port ${server.address().port}`));
     return {
         server,
         lobbies,

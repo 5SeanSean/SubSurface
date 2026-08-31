@@ -3,40 +3,26 @@ import assert from 'node:assert/strict';
 import { LavaSquare } from './lavaSquareEnemies.js';
 import { worldBounds } from './view.js';
 
-test('lava squares keep a short stub until a nearby player triggers the triangle', () => {
+test('lava squares have no stick or suction mechanics', () => {
     const enemy = new LavaSquare(0, 0, 60, 1, worldBounds, null, 0);
-    const ball = { x: 1000, y: 30, radius: 60, dx: 0, dy: 0, xPhysics: 0, yPhysics: 0, score: 0 };
-
-    enemy.aimAt(ball);
-    const distantLength = enemy.armLength;
-    const fixedMouth = enemy.mouthWidth;
-    assert.equal(fixedMouth, enemy.size / 6);
-    assert.equal(enemy.targetRadius, fixedMouth / 2);
-    assert.equal(distantLength, enemy.size);
-    assert.equal(enemy.sucking, false);
-    enemy.eat(ball);
-    assert.equal(ball.radius, 60);
-
-    ball.x = 220;
-    enemy.aimAt(ball);
-    assert.ok(enemy.armLength > distantLength);
-    assert.equal(enemy.armLength, 220 - enemy.size / 2 - ball.radius);
-    assert.equal(enemy.mouthWidth, fixedMouth);
-    assert.equal(enemy.targetRadius, ball.radius);
-    const initialRadius = ball.radius;
-    enemy.eat(ball);
-    const firstBite = initialRadius - ball.radius;
-
-    for (let i = 0; i < 1000; i++) {
-        enemy.aimAt(ball);
-        enemy.eat(ball);
+    for (const field of ['stickColor', 'armLength', 'mouthWidth', 'targetRadius', 'sucking', 'suctionStrength']) {
+        assert.equal(field in enemy, false);
     }
-    enemy.aimAt(ball);
-    const beforeLaterBite = ball.radius;
-    enemy.eat(ball);
+    assert.equal(typeof enemy.aimAt, 'undefined');
+    assert.equal(typeof enemy.eat, 'undefined');
+});
 
-    assert.ok(enemy.sucking);
-    assert.ok(firstBite > 0);
-    assert.ok(beforeLaterBite - ball.radius > firstBite);
-    assert.equal('projectiles' in enemy, false);
+test('lava squares have lower health and retarget the player that shoots them', () => {
+    const enemy = new LavaSquare(100, 100, 60, 2, worldBounds, null, Math.PI);
+    const ball = {
+        x: 300, y: 130, score: 0,
+        projectiles: [{ x: 130, y: 130, radius: 5, dx: -10, dy: 0, enemyDamage: 0.25 }]
+    };
+
+    assert.equal(enemy.health, 1);
+    enemy.checkProjectileCollisions(ball);
+
+    assert.equal(ball.projectiles.length, 0);
+    assert.ok(Math.abs(enemy.angle) < 1e-9, 'enemy did not turn toward the shooter');
+    assert.ok(enemy.dx > 0, 'enemy did not resume movement toward the shooter');
 });

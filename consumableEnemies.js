@@ -1,4 +1,4 @@
-// filepath: /h:/Downloads/PLATZIO/playerConsumables.js
+// filepath: /h:/Downloads/SUBSURFACE/playerConsumables.js
 import { physics } from "./physics.js";
 import { GAME_CONFIG } from "./config.js";
 export class Consumable {
@@ -8,7 +8,7 @@ export class Consumable {
         this.size = size;
         this.color = color;
         this.shape = shape;
-        this.speed = Math.random() *2+1;
+        // ponytail: speed is set to 0 below; the old random value here never survived.
         this.dx = 0;
         this.dy = 0;
         this.gravity = 0.1;

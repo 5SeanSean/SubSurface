@@ -1,4 +1,4 @@
-// filepath: /h:/Downloads/PLATZIO/spatialGrid.js
+// filepath: /h:/Downloads/SUBSURFACE/spatialGrid.js
 export class SpatialGrid {
     constructor(cellSize) {
         this.cellSize = cellSize;

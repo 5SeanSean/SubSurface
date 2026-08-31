@@ -1,5 +1,4 @@
-/* The game is one canvas — menu, forms and lobby are all drawn in-world by client/*Scene.js.
-   The only DOM left is the canvas itself and the score readout. */
+/* Gameplay is canvas-rendered. Text entry stays DOM-backed so keyboard and touch input work. */
 body, html {
     margin: 0;
     padding: 0;
@@ -16,6 +15,66 @@ canvas {
 }
 #gameCanvas { position: fixed; inset: 0; z-index: 0; }
 [hidden] { display: none !important; }
+
+.name-entry-input,
+.name-entry-submit {
+    position: fixed;
+    z-index: 1002;
+    box-sizing: border-box;
+    border: 3px solid white;
+    border-radius: 0;
+    font-family: 'boxycool', sans-serif;
+    text-transform: uppercase;
+}
+
+.name-entry-input {
+    padding: 0 12px;
+    outline: 0;
+    background: rgba(10, 10, 10, 0.72);
+    color: white;
+    font-size: 22px;
+}
+
+.name-entry-input::placeholder {
+    color: rgba(255, 255, 255, 0.55);
+    opacity: 1;
+}
+
+.name-entry-input:focus::placeholder {
+    color: transparent;
+}
+
+.name-entry-input:focus {
+    box-shadow: 0 0 24px rgba(255, 255, 255, 0.55);
+}
+
+.name-entry-submit {
+    padding: 0;
+    background: white;
+    color: black;
+    font-size: 24px;
+    cursor: none;
+}
+
+.name-entry-submit:hover,
+.name-entry-submit:focus-visible {
+    background: black;
+    color: white;
+    box-shadow: 0 0 24px rgba(255, 255, 255, 0.75);
+    outline: 0;
+}
+
+.name-entry-reticle {
+    position: fixed;
+    z-index: 1003;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: white;
+    mix-blend-mode: difference;
+    pointer-events: none;
+    transform: translate(-50%, -50%);
+}
 
 #scoreCounter {
     position: absolute;

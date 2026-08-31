@@ -1,4 +1,4 @@
-# Platz
+# Subsurface
 
 Browser action game with an authoritative Node/WebSocket server. GitHub Pages serves
 the client; Azure Container Apps runs the shared simulation.

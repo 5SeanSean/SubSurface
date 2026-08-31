@@ -1,16 +1,17 @@
-// filepath: /h:/Downloads/PLATZIO/lavaSquare.js
+// filepath: /h:/Downloads/SUBSURFACE/lavaSquare.js
 import { Splash } from './splash.js';
 import { Consumable } from './consumableEnemies.js';
-import { getRandomLavaColor } from './lava.js';
 import { physics } from './physics.js';
 import { generalSplashes } from './splash.js';
-import { textToRGB } from './tools.js';
 import { GAME_CONFIG } from './config.js';
 import { SpatialGrid } from './spatialGrid.js';
 
 export class LavaSquare {
-    constructor(x, y, size, speed, worldBounds, canvas, angle, health = 2,
-        { spatialGrid = new SpatialGrid(GAME_CONFIG.CELL_SIZE * 2) } = {}) {
+    // `rng` is the world's seeded stream: every enemy's appearance and identity is derived
+    // from it so all clients and the server agree without any of it going over the wire.
+    constructor(x, y, size, speed, worldBounds, canvas, angle, health = 1,
+        { spatialGrid = new SpatialGrid(GAME_CONFIG.CELL_SIZE * 2), rng = Math.random, id = null } = {}) {
+        this.rng = rng;
         this.x = x;
         this.y = y;
         this.size = size;
@@ -22,148 +23,21 @@ export class LavaSquare {
         this.color = 'red';
         this.worldBounds = worldBounds;
         this.canvas = canvas;
-        this.lavaRectangles = canvas ? this.generateLavaRectangles() : [];
         this.splashes = [];
-        this.stickColor = getRandomLavaColor();
         this.yPhysics = 0;
         this.xPhysics = 0;
         this.angle = angle;
-        this.armLength = size;
-        this.mouthWidth = size / 6;
-        this.targetRadius = size / 12;
-        this.sucking = false;
-        this.suctionStrength = 0;
-        this.id = Math.random().toString(36).substr(2, 9);
+        this.id = id ?? `e${Math.floor(rng() * 1e9).toString(36)}`;
         this.needsGridUpdate = true;
         this.spatialGrid = spatialGrid;
     }
     
-    draw(ctx, ball) {
-        ctx.save();
-        
-        // The connection stays narrow at the enemy and widens to the player's diameter.
-        const stickLength = this.armLength;
-        const stickEndX = this.x + this.size / 2 + stickLength * Math.cos(this.angle);
-        const stickEndY = this.y + this.size / 2 + stickLength * Math.sin(this.angle);
-        const mouthX = this.x + this.size / 2 + this.size / 2 * Math.cos(this.angle);
-        const mouthY = this.y + this.size / 2 + this.size / 2 * Math.sin(this.angle);
-        const normalX = -Math.sin(this.angle);
-        const normalY = Math.cos(this.angle);
-        const startHalfWidth = this.mouthWidth / 2;
-        const connectionPath = () => {
-            ctx.beginPath();
-            ctx.moveTo(mouthX + normalX * startHalfWidth, mouthY + normalY * startHalfWidth);
-            ctx.lineTo(stickEndX + normalX * this.targetRadius, stickEndY + normalY * this.targetRadius);
-            ctx.lineTo(stickEndX - normalX * this.targetRadius, stickEndY - normalY * this.targetRadius);
-            ctx.lineTo(mouthX - normalX * startHalfWidth, mouthY - normalY * startHalfWidth);
-            ctx.closePath();
-        };
-        const maxOpacity = 1;
-        const opacityPerHit = maxOpacity / this.health;
-        const currentOpacity = Math.min(this.hitCount * opacityPerHit, maxOpacity);
-        
-        // Draw splashes
-        this.splashes.forEach(splash => splash.draw(ctx));
-        
-        connectionPath();
-        ctx.fillStyle = this.stickColor;
-        ctx.shadowColor = this.stickColor;
-        ctx.shadowBlur = 10;
-        ctx.globalAlpha = 0.35;
-        ctx.fill();
-        ctx.globalAlpha = 1;
-        ctx.strokeStyle = this.stickColor;
-        ctx.lineWidth = Math.max(2, this.size / 18);
-        ctx.stroke();
-        
-        connectionPath();
-        ctx.fillStyle = `rgba(255, 255, 255, ${currentOpacity})`;
-        ctx.fill();
-
-        if (this.sucking) {
-            const phase = (performance.now() / 350) % 1;
-            ctx.fillStyle = 'white';
-            for (let i = 0; i < 5; i++) {
-                const distance = this.size / 2 + ((i / 5 - phase + 1) % 1) * (stickLength - this.size / 2);
-                ctx.beginPath();
-                const flowRadius = Math.max(2, (this.mouthWidth / 2 + (this.targetRadius - this.mouthWidth / 2) * distance / stickLength) / 4);
-                ctx.arc(
-                    this.x + this.size / 2 + distance * Math.cos(this.angle),
-                    this.y + this.size / 2 + distance * Math.sin(this.angle),
-                    flowRadius, 0, Math.PI * 2
-                );
-                ctx.fill();
-            }
-        }
-        
-        // Draw lava square body
-        ctx.fillStyle = this.color;
-        ctx.shadowColor = `rgba(${textToRGB(this.color)}, ${1 - currentOpacity})`;
-        ctx.shadowBlur = 10;
-        ctx.fillRect(this.x, this.y, this.size, this.size);
-        
-        // Draw lava square overlay
-        ctx.fillStyle = `rgba(255, 255, 255, ${currentOpacity})`;
-        ctx.shadowColor = `rgba(255, 255, 255, ${currentOpacity})`;
-        ctx.shadowBlur = 10;
-        ctx.fillRect(this.x, this.y, this.size, this.size);
-        
-        // Draw lava rectangles with clipping
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(this.x, this.y, this.size, this.size);
-        ctx.clip();
-        
-        this.lavaRectangles.forEach(rect => {
-            ctx.fillStyle = rect.color;
-            ctx.shadowColor = rect.color;
-            ctx.shadowBlur = 5;
-            ctx.fillRect(this.x + rect.x, this.y + rect.y, rect.width, rect.height);
-        });
-        ctx.restore();
-        
-        ctx.restore();
-    }
-    
-    shrinkLavaRectangles() {
-        if (!this.canvas) return;
-        const shrinkFactor = 1.0001;
-        
-        for (let i = this.lavaRectangles.length - 1; i >= 0; i--) {
-            const rect = this.lavaRectangles[i];
-            rect.x *= shrinkFactor;
-            rect.y *= shrinkFactor;
-            rect.width *= shrinkFactor;
-            rect.height *= shrinkFactor;
-            
-            // Remove rectangles that are too small
-            if (rect.width <= 2 || rect.height <= 2) {
-                this.lavaRectangles.splice(i, 1);
-            }
-        }
-        
-        // Add new rectangle if needed
-        if (this.lavaRectangles.length === 0) {
-            this.lavaRectangles.push({
-                x: Math.random() * this.size,
-                y: Math.random() * this.size,
-                width: Math.random() * (this.size / 4) + 2,
-                height: Math.random() * (this.size / 4) + 2,
-                color: getRandomLavaColor()
-            });
-        }
-    }
-    
 update(ball, projectiles, consumables, platforms, endGame, lavaSquares) {
-    this.aimAt(ball);
-    
     // Check if destroyed
     if (this.hitCount >= this.health) {
         this.destroy(consumables, ball, lavaSquares);
         return;
     }
-    if (this.sucking) this.eat(ball);
-    
     // Update position
     // ponytail: clamp per-frame move to < own size so a fast square can't tunnel
     // clean through a platform/other square (collision is discrete AABB below).
@@ -210,9 +84,6 @@ update(ball, projectiles, consumables, platforms, endGame, lavaSquares) {
     // Update splashes
     this.updateSplashes();
     
-    // Update lava rectangles
-    this.shrinkLavaRectangles();
-    
     // Mark for grid update if physics changed position
     if (Math.abs(this.xPhysics) > 0.1 || Math.abs(this.yPhysics) > 0.1) {
         this.needsGridUpdate = true;
@@ -243,7 +114,6 @@ update(ball, projectiles, consumables, platforms, endGame, lavaSquares) {
         
         // Clean up resources
         this.splashes.forEach(splash => splash.destroy());
-        this.lavaRectangles.length = 0;
     }
     
     checkLavaSquareCollisions(nearbyLavaSquares, lavaSquares) {
@@ -299,13 +169,7 @@ update(ball, projectiles, consumables, platforms, endGame, lavaSquares) {
                 // winSizeConstant = 1 at reference res, >1 on smaller windows — an
                 // accidental advantage a shared server can't allow).
                 ball.score += 0.5;
-                this.hitCount += projectile.radius / 40;
-                
-                if (this.hitCount >= 30) {
-                    ball.score += this.size;
-                    ball.projectiles.splice(i, 1);
-                    return;
-                }
+                this.hitCount += projectile.enemyDamage ?? projectile.radius / 40;
                 
                 // Create splash effect
                 if (this.canvas) this.splashes.push(new Splash(
@@ -323,12 +187,16 @@ update(ball, projectiles, consumables, platforms, endGame, lavaSquares) {
                 this.xPhysics = projectile.dx / 5;
                 this.yPhysics = projectile.dy / 5;
                 
+                // Retarget the player who hit us, then resume at our normal speed toward them.
+                const centerX = this.x + this.size / 2;
+                const centerY = this.y + this.size / 2;
+                this.angle = Math.atan2(ball.y - centerY, ball.x - centerX);
+
                 // Adjust size
                 const halfSZ = this.size / 2;
                 this.size *= 1.0001;
                 this.dx = this.speed * Math.cos(this.angle);
                 this.dy = this.speed * Math.sin(this.angle);
-                this.shrinkLavaRectangles();
                 this.x += halfSZ - this.size / 2;
                 this.y += halfSZ - this.size / 2;
                 
@@ -445,37 +313,6 @@ handleWorldBounds() {
     }
 }
     
-    aimAt(ball) {
-        const dx = ball.x - this.x - this.size / 2;
-        const dy = ball.y - this.y - this.size / 2;
-        const distance = Math.hypot(dx, dy);
-        const reach = this.size * 2;
-        const gap = distance - this.size / 2 - ball.radius;
-        this.angle = Math.atan2(dy, dx);
-        this.mouthWidth = this.size / 6;
-        this.sucking = gap <= reach;
-        this.suctionStrength = this.sucking ? 1 - Math.max(0, gap) / reach : 0;
-        this.armLength = this.sucking ? Math.max(this.size / 2, distance - ball.radius) : this.size;
-        this.targetRadius = this.sucking ? ball.radius : this.mouthWidth / 2;
-    }
-
-    eat(ball) {
-        if (!this.sucking) return;
-        const deathSize = GAME_CONFIG.REF_HEIGHT / 40;
-        const bite = Math.min(
-            ball.radius - deathSize,
-            GAME_CONFIG.REF_HEIGHT / 30000 * (this.size / (ball.radius * 2)) ** 1.5 *
-                (0.2 + this.suctionStrength * 0.8)
-        );
-        if (bite <= 0) { ball.dead = true; return; }
-        ball.radius -= bite;
-        if (ball.radius <= deathSize) ball.dead = true;
-        this.x -= bite;
-        this.y -= bite;
-        this.size += bite * 2;
-        this.needsGridUpdate = true;
-    }
-
     checkPlayerCollision(ball, consumables, lavaSquares) {
         const distance = Math.hypot(
             this.x + this.size / 2 - ball.x,
@@ -513,14 +350,10 @@ handleWorldBounds() {
 
     stepMP(players, platformsObj, consumables, lavaSquares) {
         const target = this.nearestPlayer(players);
-        if (target) this.aimAt(target);
-        else this.sucking = false;
         if (this.hitCount >= this.health) {
             this.destroy(consumables, target || { score: 0 }, lavaSquares);
             return;
         }
-        if (target && this.sucking) this.eat(target);
-
         // Position with the same anti-tunnel clamp as single-player update()
         const stepX = this.dx + this.xPhysics;
         const stepY = this.dy + this.yPhysics;
@@ -546,7 +379,6 @@ handleWorldBounds() {
         }
 
         this.updateSplashes();
-        this.shrinkLavaRectangles();
         if (Math.abs(this.xPhysics) > 0.1 || Math.abs(this.yPhysics) > 0.1) this.needsGridUpdate = true;
     }
 
@@ -560,30 +392,12 @@ handleWorldBounds() {
         }
     }
     
-    generateLavaRectangles() {
-        const rectangles = [];
-        const count = 10;
-        
-        for (let i = 0; i < count; i++) {
-            rectangles.push({
-                x: Math.random() * this.size,
-                y: Math.random() * this.size,
-                width: Math.random() * this.size + 4,
-                height: Math.random() * (this.size / 4) + (this.size / 10),
-                color: getRandomLavaColor()
-            });
-        }
-        
-        return rectangles;
-    }
-    
     reset() {
         this.spatialGrid.remove(this);
         this.x = GAME_CONFIG.REF_WIDTH / 4;
         this.y = GAME_CONFIG.REF_HEIGHT / 4;
         this.size = 40;
         this.hitCount = 0;
-        this.lavaRectangles = this.generateLavaRectangles();
         this.splashes.forEach(splash => splash.destroy());
         this.splashes.length = 0;
         this.needsGridUpdate = true;

@@ -4,8 +4,17 @@ import { WebSocket } from 'ws';
 import { createGameServer } from './server.js';
 import { createWorld } from '../sim/world.js';
 import { setupPlatforms } from '../platforms.js';
+import { hashSeed } from '../sim/rng.js';
 import { worldBounds } from '../view.js';
 import { GAME_CONFIG } from '../config.js';
+import { LOBBY } from '../sim/lobbyLayout.js';
+
+// The host begins a round by shooting START: drop a projectile onto the button rect and let the
+// server tick detect it. Only the host's projectiles are tested, so this is inherently host-only.
+const hostStart = lobby => lobby.world.players.get(lobby.hostId).ball.projectiles.push({
+    x: LOBBY.startBtn.x + LOBBY.startBtn.w / 2, y: LOBBY.startBtn.y + LOBBY.startBtn.h / 2,
+    radius: 6, dx: 0, dy: 0, ricochetCount: 0
+});
 
 const waitUntil = (check, message, timeout = 1000) => new Promise((done, fail) => {
     const deadline = Date.now() + timeout;
@@ -56,7 +65,7 @@ test('lobbies wait for their host, isolate worlds, migrate ownership, and disapp
         const redGuest = await connect(port, { lobby: 'RED', name: 'Bob' });
         clients.push(redGuest);
         await waitUntil(() => red.clients.size === 2 && red.world.players.has(red.joinOrder[1]), 'guest did not join RED');
-        assert.equal(red.status, 'staging', 'lobby stays in staging until the phase clock fires');
+        assert.equal(red.status, 'staging', 'lobby stays in staging until the host shoots START');
 
         const blueHost = await connect(port, { lobby: 'BLUE', name: 'First', create: true });
         const blueGuest = await connect(port, { lobby: 'BLUE', name: 'Second' });
@@ -74,8 +83,12 @@ test('lobbies wait for their host, isolate worlds, migrate ownership, and disapp
         const fifthClose = await new Promise(done => fifth.once('close', (code, reason) => done({ code, reason: reason.toString() })));
         assert.deepEqual(fifthClose, { code: 4403, reason: 'Lobby is full' });
         const secondId = [...blue.clients.keys()][1];
-        blueHost.close();
-        await waitUntil(() => blue.hostId === secondId, 'host did not migrate to a live player');
+        blueHost.send(JSON.stringify({ t: 'leave' }));
+        await waitUntil(() => blue.hostId === secondId && blue.clients.size === 3,
+            'host did not leave immediately or migrate to the second player');
+        assert.equal(blue.joinOrder[0], secondId, 'second player did not become first in join order');
+        assert.equal(blue.world.players.get(secondId).ball.x, LOBBY.hostX,
+            'new host was not moved onto the host platform');
 
         for (const ws of clients) ws.close();
         await waitUntil(() => game.lobbies.size === 0, 'empty lobbies were not deleted');
@@ -132,10 +145,18 @@ test('a round stages, plays, ends on last-standing, and cycles into the next rou
         assert.equal(lobby.round, 1);
         const stagingSeed = lobby.world.seed;
 
-        // Staging auto-begins the round — no host start button exists any more.
-        await waitUntil(() => lobby.status === 'playing', 'staging never auto-began', 8000);
+        // Staging holds until the HOST shoots START — no auto-countdown.
+        await new Promise(r => setTimeout(r, 250));
+        assert.equal(lobby.status, 'staging', 'staging should wait for the host, not auto-begin');
+        const stagingHost = { ...lobby.world.players.get(lobby.hostId).ball };
+        hostStart(lobby);
+        await waitUntil(() => lobby.status === 'starting', 'START did not trigger the break phase');
+        assert.equal(lobby.world.snapshot().platforms.length, 0, 'all staging pads and the divider should break together');
+        await waitUntil(() => lobby.status === 'playing', 'host START did not begin the round', 3000);
         const [alphaId, betaId] = lobby.joinOrder;
         assert.ok(lobby.world.players.has(alphaId) && lobby.world.players.has(betaId), 'players not in the round world');
+        assert.equal(lobby.world.players.get(alphaId).ball.x, stagingHost.x, 'host teleported horizontally when the arena appeared');
+        assert.ok(lobby.world.players.get(alphaId).ball.y > stagingHost.y, 'host fall was not carried into the arena');
         assert.equal(lobby.world.seed, stagingSeed, 'round should reuse the seed staged for it');
 
         // Knock Beta out; pvp ends the round with one player standing.
@@ -179,6 +200,60 @@ test('platform geometry never goes over the wire and is reproducible from the se
     assert.equal(client.platforms.length, a.snapshot().platforms.length, 'client arena diverged from the server');
 });
 
+test('the host stays put while guest pads ease down and joined players fall in', () => {
+    const world = createWorld({ mode: 'coop', lobby: true, seed: 42 });
+    world.addLobbyPlayer(1, 0);
+    const before = world.snapshot();
+    const hostBefore = before.players.find(p => p.id === 1);
+    const hostPadBefore = before.platforms[0];
+    const guestPadBefore = before.platforms[1];
+    const dividerBefore = before.platforms[4];
+
+    for (let i = 0; i < 30; i++) world.tick(GAME_CONFIG.TICK_DURATION);
+
+    const after = world.snapshot();
+    const hostAfter = after.players.find(p => p.id === 1);
+    assert.equal(hostAfter.x, hostBefore.x, 'host moved horizontally during lobby creation');
+    assert.equal(hostAfter.y, hostBefore.y, 'host dropped in despite already occupying the menu pad');
+    assert.equal(after.platforms[0].y, hostPadBefore.y, 'host platform descended');
+    assert.ok(after.platforms[1].y > guestPadBefore.y, 'empty guest platform did not descend');
+    assert.ok(after.platforms[4].y > dividerBefore.y, 'divider did not descend');
+});
+
+test('a guest shot on START is consumed and triggers the alternate-message path', () => {
+    const world = createWorld({ mode: 'coop', lobby: true, seed: 9 });
+    world.addLobbyPlayer(1, 0);
+    world.addLobbyPlayer(2, 1);
+    const guest = world.players.get(2).ball;
+    guest.projectiles.push({
+        id: 'guest-start-attempt',
+        x: LOBBY.startBtn.x + LOBBY.startBtn.w / 2,
+        y: LOBBY.startBtn.y + LOBBY.startBtn.h / 2,
+        radius: 8,
+        dx: 0,
+        dy: 0,
+        ricochetCount: 0,
+        ownerId: 2
+    });
+
+    assert.equal(world.checkGuestBlockHit(1), true);
+    assert.equal(guest.projectiles.length, 0);
+});
+
+test('lobby platform dip and bounce are deterministic for a seed', () => {
+    const a = createWorld({ mode: 'coop', lobby: true, seed: 777 });
+    const b = createWorld({ mode: 'coop', lobby: true, seed: 777 });
+    const c = createWorld({ mode: 'coop', lobby: true, seed: 778 });
+    for (let i = 0; i < 220; i++) {
+        a.tick(GAME_CONFIG.TICK_DURATION);
+        b.tick(GAME_CONFIG.TICK_DURATION);
+        c.tick(GAME_CONFIG.TICK_DURATION);
+    }
+    const ys = world => world.snapshot().platforms.slice(1).map(p => p.y);
+    assert.deepEqual(ys(a), ys(b), 'same seed produced different lobby motion');
+    assert.notDeepEqual(ys(a), ys(c), 'different seeds produced identical lobby motion');
+});
+
 test('a client that missed the destroying frame still catches up on the destruction', () => {
     const server = setupPlatforms(null, worldBounds, 31337);
     const client = setupPlatforms(null, worldBounds, 31337);
@@ -194,6 +269,61 @@ test('a client that missed the destroying frame still catches up on the destruct
     client.applySync(server.damage(), server.extras());
     assert.equal(client.platforms.length, server.platforms.length, 'client kept a platform the server destroyed');
     assert.ok(!client.platforms.some(p => p.index === victim.index), 'destroyed platform survived on the client');
+});
+
+test('the whole world - platforms AND enemies - is reproducible from the seed alone', () => {
+    const run = seed => {
+        const w = createWorld({ mode: 'coop', seed });
+        w.addPlayer(1);
+        for (let i = 0; i < 4000; i++) w.tick(GAME_CONFIG.TICK_DURATION);
+        const s = w.snapshot();
+        return JSON.stringify({
+            platforms: s.platforms.map(p => [p.x, p.y, p.width, p.height]),
+            enemies: s.enemies.map(e => [e.id, e.x, e.y, e.size, e.angle])
+        });
+    };
+    const a = run(2024), b = run(2024), c = run(2025);
+    assert.ok(JSON.parse(a).enemies.length > 0, 'no enemies spawned, so the check proves nothing');
+    assert.equal(a, b, 'same seed produced a different world');
+    assert.notEqual(a, c, 'different seeds produced the same world');
+});
+
+test('a lobby name IS its seed: the world is derived from the name alone', async () => {
+    const game = createGameServer({ port: 0 });
+    await new Promise(done => game.server.once('listening', done));
+    const { port } = game.server.address();
+    const clients = [];
+    try {
+        // No seed is sent over the wire at all — only the lobby name.
+        const ws = new WebSocket(`ws://127.0.0.1:${port}?lobby=K7QP2M&name=Host&create=1`);
+        await new Promise((done, fail) => { ws.once('open', done); ws.once('error', fail); });
+        clients.push(ws);
+        await waitUntil(() => game.lobbies.get('K7QP2M'), 'lobby was not created');
+        const lobby = game.lobbies.get('K7QP2M');
+        assert.equal(lobby.baseSeed, hashSeed('K7QP2M'), 'seed was not derived from the lobby name');
+        assert.equal(lobby.world.seed, hashSeed('K7QP2M'), 'round 1 is not the world that name denotes');
+
+        // Anyone who knows only the name reproduces the identical arena.
+        const local = setupPlatforms(null, worldBounds, hashSeed('K7QP2M'));
+        // All four staging pads exist at creation, even while the three guest slots are empty.
+        // The only other runtime geometry is the descending divider.
+        const staged = lobby.world.snapshot().platforms;
+        assert.equal(staged.length, 4 + LOBBY.fixtures.length, 'staging should contain four pads and the divider');
+        hostStart(lobby);
+        await waitUntil(() => lobby.status === 'playing', 'round never began', 3000);
+        assert.deepEqual(
+            lobby.world.snapshot().platforms.map(p => [p.x, p.y]),
+            local.platforms.map(p => [p.x, p.y]),
+            'lobby arena does not match the world its name denotes'
+        );
+
+        // A different name is a different world.
+        const other = setupPlatforms(null, worldBounds, hashSeed('ZZZZZZ'));
+        assert.notDeepEqual(local.platforms.map(p => [p.x, p.y]), other.platforms.map(p => [p.x, p.y]));
+    } finally {
+        for (const ws of clients) ws.terminate();
+        await game.close();
+    }
 });
 
 test('static platforms never drift', () => {
