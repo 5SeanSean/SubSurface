@@ -23,7 +23,26 @@ if (params.get('name')) {
 if (params.get('server')) sessionStorage.setItem('subsurfaceServer', params.get('server'));
 
 let clientId = localStorage.getItem('subsurfaceClientId');
-if (!clientId) { clientId = crypto.randomUUID(); localStorage.setItem('subsurfaceClientId', clientId); }
+if (!clientId) {
+    clientId = globalThis.crypto?.randomUUID?.() ?? createClientId();
+    localStorage.setItem('subsurfaceClientId', clientId);
+}
+
+function createClientId() {
+    const bytes = new Uint8Array(16);
+    const cryptoApi = globalThis.crypto;
+
+    if (cryptoApi?.getRandomValues) {
+        cryptoApi.getRandomValues(bytes);
+    } else {
+        for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+    }
+
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 export const CLIENT_ID = clientId;
 
 // A lobby name and a seed name are the same thing, so ?lobby= wins when present.
