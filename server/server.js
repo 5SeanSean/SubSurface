@@ -27,7 +27,11 @@ const DEFAULT_ORIGINS = [
     'http://localhost:8000', 'http://127.0.0.1:8000',
     'http://localhost:8080', 'http://127.0.0.1:8080',
     'http://localhost:5500', 'http://127.0.0.1:5500',
-    'https://5seansean.github.io'
+    'https://5seansean.github.io',
+    // GitHub Pages' custom domain. Keep HTTP temporarily so the multiplayer server
+    // remains reachable while the domain's TLS certificate is being provisioned.
+    'http://subsurface.rocks', 'https://subsurface.rocks',
+    'http://www.subsurface.rocks', 'https://www.subsurface.rocks'
 ];
 const CONTENT_TYPES = {
     '.css': 'text/css', '.html': 'text/html', '.js': 'text/javascript',
