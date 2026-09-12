@@ -25,6 +25,7 @@ export function createGameScene(stage, { seedX = null, seedY = null, onExit = nu
     // would leave the camera and score watching the corpse of the previous life forever.
     const ballOf = () => stage.world.players.get(id)?.ball ?? null;
     const ball = ballOf();
+    let lastPointerRevision = stage.pointer.revision;
     stage.camera.setTarget(ballOf, { ease: 0.1 });
 
     // Debris where the platform shattered.
@@ -57,7 +58,9 @@ export function createGameScene(stage, { seedX = null, seedY = null, onExit = nu
         const b = ballOf();
         if (!b) return;
         const aim = Math.atan2((stage.pointer.y + stage.cam.y) - b.y, (stage.pointer.x + stage.cam.x) - b.x);
-        stage.world.setInput(id, { ...input.read(), aim });
+        const aimMoved = stage.pointer.revision !== lastPointerRevision;
+        lastPointerRevision = stage.pointer.revision;
+        stage.world.setInput(id, { ...input.read(), aim, aimMoved });
         for (let i = splashes.length - 1; i >= 0; i--) {
             splashes[i].update();
             if (splashes[i].isFinished()) splashes.splice(i, 1);
@@ -72,6 +75,11 @@ export function createGameScene(stage, { seedX = null, seedY = null, onExit = nu
             ctx.restore();
         }
         scoreCounter.textContent = `Score: ${Math.round(ballOf()?.score ?? 0)}`;
+        const visible = stage.visibleFrame;
+        const hud = stage.toClientPoint({ x: visible.x + 24, y: visible.y + 20 });
+        scoreCounter.style.left = `${hud.x}px`;
+        scoreCounter.style.top = `${hud.y}px`;
+        scoreCounter.style.fontSize = `${56 * hud.scale}px`;
         pause.draw(ctx);
     }
 

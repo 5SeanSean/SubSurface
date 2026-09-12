@@ -6,6 +6,23 @@ import { physics } from '../physics.js';
 import { SHOT_RANGE, adjustRange, removeArea, shotProfile } from './playerRanges.js';
 
 const H = GAME_CONFIG.REF_HEIGHT;
+// Recoil is the only propulsion (jumping is gone), modelled on conservation of momentum: the
+// mass ejected as the shot (the area removed from the body) leaves at the projectile's speed, so
+// the body gains the opposite momentum. Δv = gain · shotSpeed · ejectedMass / bodyMass, mass ∝
+// area (radius²). Recoil therefore scales with the SQUARE of projectile/player size — a wide
+// green shot kicks far harder than a compact purple one — and stays physically small, so movement
+// feels weighty instead of rocket-jumpy. RECOIL_GAIN is the one tuning knob (1 = pure physics).
+const RECOIL_GAIN = H / 18;  // base launch velocity per shot
+const RECOIL_MAX = H / 60;   // per-direction plateau: shots fade + hard-clamp to this launch speed
+const MAX_SPEED = GAME_CONFIG.PLAYER_MAX_SPEED;
+const HORIZONTAL_RECOIL = 0.58;
+
+function clampPlayerSpeed(ball) {
+    const speed = Math.hypot(ball.dx, ball.dy);
+    if (speed <= MAX_SPEED) return;
+    ball.dx *= MAX_SPEED / speed;
+    ball.dy *= MAX_SPEED / speed;
+}
 
 export function createBall(id, worldBounds) {
     return {
@@ -30,35 +47,39 @@ export function createBall(id, worldBounds) {
         score: 0,
         xPhysics: 0,
         yPhysics: 0,
-        angle: 0,      // aim, set from the client's input.aim each tick
+        angle: 0,      // physical arm angle after platform constraints
+        aimAngle: 0,   // requested pointer angle
+        previousAimAngle: 0,
+        aimMoved: false,
+        armMode: 'leverage',
+        armPivot: null,
+        releaseArmPivot: false,
         strength: 1,
         shotRange: SHOT_RANGE.initial,
         lastShotTime: 0,
         projSeq: 0,     // stable per-shot id, so clients can interpolate a projectile's flight
+        jumpedThisTick: false,
         dead: false
     };
 }
 
 // input: { keys:Set<string>, shooting:bool, jump:bool (edge), aim:number (radians) }
 export function stepBall(ball, input, worldBounds, dtMs = GAME_CONFIG.TICK_DURATION) {
-    ball.angle = input.aim ?? ball.angle;
+    ball.jumpedThisTick = false;
+    ball.previousAimAngle = ball.aimAngle ?? ball.angle;
+    // Space/W/Up and S/Down are auto-firing thrusters (see tryShoot). Up-thrust aims the shot
+    // straight down; down-thrust aims it straight up. Neither held means aim follows the mouse.
+    const thrusting = (input.keys.has(' ') || input.keys.has('w') || input.keys.has('arrowup')) && ball.isGameRunning;
+    const dashing = !thrusting && (input.keys.has('s') || input.keys.has('arrowdown')) && ball.isGameRunning;
+    ball.aimAngle = thrusting ? Math.PI / 2
+        : dashing ? -Math.PI / 2
+        : (input.aim ?? ball.aimAngle ?? ball.angle);
+    ball.aimMoved = !thrusting && !dashing && !!input.aimMoved;
 
     const wider = input.keys.has('q');
     const narrower = input.keys.has('e');
     if (wider !== narrower) {
         ball.shotRange = adjustRange(SHOT_RANGE, ball.shotRange, wider ? 1 : -1, dtMs);
-    }
-
-    // Jump (edge-triggered)
-    if (input.jump && ball.isGameRunning) {
-        if (!ball.isJumping) {
-            ball.dy = ball.jumpPower * ball.strength;
-            ball.isJumping = true;
-            ball.canDoubleJump = true;
-        } else if (ball.canDoubleJump) {
-            ball.dy = ball.jumpPower * ball.strength;
-            ball.canDoubleJump = false;
-        }
     }
 
     applyDirection(ball, input);
@@ -68,6 +89,9 @@ export function stepBall(ball, input, worldBounds, dtMs = GAME_CONFIG.TICK_DURAT
 
     physics(ball);
     ball.dy += ball.gravity;
+
+    // Overall terminal speed: stacking diagonals and long falls can't build past this.
+    clampPlayerSpeed(ball);
 
     // World bounds
     if (ball.x - ball.radius < worldBounds.left) {
@@ -91,29 +115,29 @@ export function stepBall(ball, input, worldBounds, dtMs = GAME_CONFIG.TICK_DURAT
 
     if (ball.radius < H / 40) ball.dead = true;
 
-    if (ball.strength < 1) ball.strength += 0.05;
+    if (ball.strength < 1) ball.strength = Math.min(1, ball.strength + 0.05);
     if (ball.strength < 0) ball.strength = 0;
 }
 
 function applyDirection(ball, input) {
     const hasA = input.keys.has('a') || input.keys.has('arrowleft');
     const hasD = input.keys.has('d') || input.keys.has('arrowright');
-    const hasS = input.keys.has('s') || input.keys.has('arrowdown');
 
     if (hasA && hasD) ball.dx = 0;
-    else if (hasA) ball.dx = -ball.speed;
-    else if (hasD) ball.dx = ball.speed;
-    else ball.dx *= ball.friction;
-
-    if (hasS && ball.isGameRunning && ball.dy < 15) {
-        ball.dy += 0.5 * ball.strength;
-        ball.isJumping = false;
-    }
+    // Walking sets a target speed but must never SLOW existing momentum — recoil launches you
+    // faster than walking, and pressing toward that motion should keep it, not clamp it to walk
+    // speed. Pressing toward your travel keeps the faster of the two; pressing against it reverses.
+    else if (hasD) ball.dx = Math.max(ball.dx, ball.speed);
+    else if (hasA) ball.dx = Math.min(ball.dx, -ball.speed);
+    else if (!ball.isJumping) ball.dx *= ball.friction;   // friction only on the ground; air keeps momentum
+    // S no longer fast-drops directly: it auto-fires straight up, so the recoil dashes you down.
 }
 
-// Fire if the fire button is held and the cooldown has elapsed (logical clock).
-export function tryShoot(ball, input, currentTime) {
-    if (!input.shooting || !ball.isGameRunning) return;
+// Fire if the fire button is held (or space is thrusting) and the cooldown has elapsed.
+export function tryShoot(ball, input, currentTime, { consumeSize = true } = {}) {
+    const firing = input.shooting || input.keys?.has(' ') || input.keys?.has('w') || input.keys?.has('arrowup') ||
+        input.keys?.has('s') || input.keys?.has('arrowdown');
+    if (!firing || !ball.isGameRunning) return;
     const profile = shotProfile(ball);
     if (currentTime - ball.lastShotTime < profile.cooldownMs) return;
     if (ball.currentStock <= 0) {
@@ -121,19 +145,66 @@ export function tryShoot(ball, input, currentTime) {
         return;
     }
 
-    const nextRadius = removeArea(ball.radius, profile.areaCost);
-    if (nextRadius < H / 40) return;
+    // No suicide blocker: a shot that shrinks you past the death size is allowed — stepBall's
+    // radius check then kills you. removeArea already floors the radius at 0.
+    const nextRadius = consumeSize ? removeArea(ball.radius, profile.areaCost) : ball.radius;
     ball.lastShotTime = currentTime;
     ball.currentStock--;
     ball.radius = nextRadius;
+    // Shots follow where you AIM, not the physically-blocked arm angle: standing on a platform the
+    // arm can't rotate down through it, so firing on ball.angle made the space down-thrust come out
+    // shallow and weak. aimAngle is the pointer (or straight down while thrusting).
+    const shotAngle = ball.aimAngle ?? ball.angle;
+    // Recoil propulsion. Applied as VELOCITY (dx/dy), not the fast-decaying impulse channel, so
+    // one shot is a real jump — velocity is bled off only by gravity, like the old jump, instead
+    // of vanishing in a few ticks. Consistency across directions comes from air having no friction
+    // (see applyDirection): every direction is then just velocity + gravity. Scaled by the linear
+    // projectile ÷ player size ratio so a wide green shot launches further than a compact purple
+    // one, without the square-law blowing green's jump height out of proportion. Not in the lobby.
+    if (ball.armMode !== 'locked') {
+        const recoil = RECOIL_GAIN * profile.projectileRadius / ball.radius;
+        const cap = RECOIL_MAX;
+        // Side propulsion is intentionally softer than vertical thrust. Scale only the X axis,
+        // so diagonals transition smoothly instead of switching strength at an angle threshold.
+        const rx = -Math.cos(shotAngle) * HORIZONTAL_RECOIL;
+        const ry = -Math.sin(shotAngle);
+        // Diminishing returns per direction: the recoil fades the faster you're already moving
+        // that way, so the first shot hits hard and stacking the same way plateaus toward `cap`.
+        // A new direction is full strength again (your speed that way is low).
+        const directionLength = Math.max(1e-9, Math.hypot(rx, ry));
+        const nx = rx / directionLength, ny = ry / directionLength;
+        const speedThatWay = ball.dx * nx + ball.dy * ny;
+        const fade = Math.max(0, Math.min(1, 1 - speedThatWay / cap));
+        const recoilDX = rx * recoil * fade;
+        const recoilDY = ry * recoil * fade;
+        ball.dx += recoilDX;
+        ball.dy += recoilDY;
+        // Release only for recoil that explicitly pushes away from a planted contact. Inferring
+        // this from total velocity breaks legitimate tangential movement around the leverage arc.
+        if (ball.armPivot) {
+            const pivotDX = ball.armPivot.x - ball.x;
+            const pivotDY = ball.armPivot.y - ball.y;
+            const pivotDistance = Math.max(1e-9, Math.hypot(pivotDX, pivotDY));
+            const recoilTowardPivot = recoilDX * pivotDX / pivotDistance +
+                recoilDY * pivotDY / pivotDistance;
+            if (recoilTowardPivot < -0.25) ball.releaseArmPivot = true;
+        }
+        // Hard clamp so even one huge shot can't launch past this direction's plateau.
+        const after = ball.dx * nx + ball.dy * ny;
+        if (after > cap) { ball.dx -= nx * (after - cap); ball.dy -= ny * (after - cap); }
+        // Clamp in the same tick as the shot. Waiting for the next movement step allowed the
+        // third stacked shot to exceed the advertised terminal speed for a whole server frame.
+        clampPlayerSpeed(ball);
+        if (ball.dy < 0) ball.isJumping = true;   // launched off the ground: airborne
+    }
     const speed = ball.projSpeed;
     ball.projectiles.push({
         id: `${ball.id}-${++ball.projSeq}`,
-        x: ball.x + (ball.radius * 1.7 * Math.cos(ball.angle)) / 2,
-        y: ball.y + (ball.radius * 1.7 * Math.sin(ball.angle)) / 2,
+        x: ball.x + (ball.radius * 1.7 * Math.cos(shotAngle)) / 2,
+        y: ball.y + (ball.radius * 1.7 * Math.sin(shotAngle)) / 2,
         radius: profile.projectileRadius,
-        dx: speed * Math.cos(ball.angle),
-        dy: speed * Math.sin(ball.angle),
+        dx: speed * Math.cos(shotAngle),
+        dy: speed * Math.sin(shotAngle),
         ricochetCount: 0,
         ownerId: ball.id,
         shotRange: profile.normalized,

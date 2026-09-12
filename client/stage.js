@@ -10,6 +10,7 @@ import { createWorld } from '../sim/world.js';
 import { renderWorld } from './render.js';
 import { createCamera } from './camera.js';
 import { WORLD_SEED } from './config.js';
+import { calculateCoverViewport } from './viewport.js';
 
 const MENU_FRAME = 0;   // menu sits in the clear headroom at the very top; breaking a rock drops you down into the platform field
 const WORLD_W = GAME_CONFIG.WORLD_WIDTH;
@@ -21,22 +22,36 @@ export function createStage() {
     const canvas = document.getElementById('gameCanvas');
     const ctx = canvas.getContext('2d');
     canvas.hidden = false;
-    // Re-checked every frame, not just on the resize event: if the window reports 0x0 at
-    // construction (hidden tab, pane not yet displayed) a one-shot resize leaves the canvas
-    // 0x0 forever and the game renders nothing with no error to show for it.
+    // Render into one fixed logical viewport, then cover the browser window. Non-16:9 screens
+    // crop only the excess dimension instead of exposing letterbox bars.
+    canvas.width = GAME_CONFIG.REF_WIDTH;
+    canvas.height = GAME_CONFIG.REF_HEIGHT;
+    let viewport = {
+        left: 0, top: 0, width: canvas.width, height: canvas.height, scale: 1,
+        visible: { x: 0, y: 0, w: canvas.width, h: canvas.height }
+    };
     const resize = () => {
         const w = window.innerWidth, h = window.innerHeight;
-        if (w && h && (canvas.width !== w || canvas.height !== h)) { canvas.width = w; canvas.height = h; }
+        if (!w || !h) return;
+        viewport = calculateCoverViewport(w, h, canvas.width, canvas.height);
+        Object.assign(canvas.style, {
+            left: `${viewport.left}px`, top: `${viewport.top}px`,
+            width: `${viewport.width}px`, height: `${viewport.height}px`
+        });
     };
     resize();
     window.addEventListener('resize', resize);
 
-    const pointer = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
-    window.addEventListener('mousemove', e => { pointer.x = e.clientX; pointer.y = e.clientY; });
+    const pointer = { x: canvas.width / 2, y: canvas.height / 2, revision: 0 };
+    window.addEventListener('mousemove', e => {
+        pointer.x = (e.clientX - viewport.left) / viewport.scale;
+        pointer.y = (e.clientY - viewport.top) / viewport.scale;
+        pointer.revision++;
+    });
 
-    const background = new Background(canvas, worldBounds);
-    const lava = createLava(worldBounds, canvas);
-    const lavaBackground = createLavaBackground(worldBounds);
+    const background = new Background(canvas, worldBounds, WORLD_SEED);
+    const lava = createLava(worldBounds, canvas, WORLD_SEED);
+    const lavaBackground = createLavaBackground(worldBounds, WORLD_SEED);
     // The local world runs off this session's world name, hashed (from ?lobby=/?seed=, else
     // rolled and written into the URL). Reloading gives you the identical world back.
     const newWorld = (seed = WORLD_SEED) => createWorld({ mode: 'coop', seed, canvas });
@@ -44,7 +59,14 @@ export function createStage() {
     // Leaving a game back to the menu rebuilds the world, so you return to a pristine arena
     // rather than one still carrying the last run's damage and enemies. A seed may be passed
     // when the session switches worlds — e.g. you typed the name of a world nobody was hosting.
-    const resetWorld = (seed) => { world = newWorld(seed); state = world.snapshot(); return world; };
+    const resetWorld = (seed = WORLD_SEED) => {
+        world = newWorld(seed);
+        background.setSeed(seed);
+        lava.setSeed(seed);
+        lavaBackground.setSeed(seed);
+        state = world.snapshot();
+        return world;
+    };
 
     const camera = createCamera(canvas);
     const cam = camera.pos;   // scenes and renderers read cam.x / cam.y
@@ -91,6 +113,23 @@ export function createStage() {
 
     return {
         canvas, ctx, pointer, cam, camera, background, lava, lavaBackground, setScene, resetWorld,
+        toClientRect(box) {
+            return {
+                x: viewport.left + box.x * viewport.scale,
+                y: viewport.top + box.y * viewport.scale,
+                w: box.w * viewport.scale,
+                h: box.h * viewport.scale,
+                scale: viewport.scale
+            };
+        },
+        toClientPoint(point) {
+            return {
+                x: viewport.left + point.x * viewport.scale,
+                y: viewport.top + point.y * viewport.scale,
+                scale: viewport.scale
+            };
+        },
+        get visibleFrame() { return viewport.visible; },
         get world() { return world; },
         get state() { return state; }
     };

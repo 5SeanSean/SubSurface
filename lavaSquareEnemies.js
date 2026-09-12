@@ -5,6 +5,7 @@ import { physics } from './physics.js';
 import { generalSplashes } from './splash.js';
 import { GAME_CONFIG } from './config.js';
 import { SpatialGrid } from './spatialGrid.js';
+import { removeArea } from './sim/playerRanges.js';
 
 export class LavaSquare {
     // `rng` is the world's seeded stream: every enemy's appearance and identity is derived
@@ -15,6 +16,7 @@ export class LavaSquare {
         this.x = x;
         this.y = y;
         this.size = size;
+        this.baseSize = size;
         this.speed = speed;
         this.dx = Math.cos(angle) * speed;
         this.dy = Math.sin(angle) * speed;
@@ -30,6 +32,7 @@ export class LavaSquare {
         this.id = id ?? `e${Math.floor(rng() * 1e9).toString(36)}`;
         this.needsGridUpdate = true;
         this.spatialGrid = spatialGrid;
+        this.playerContactCooldowns = new Map();
     }
     
 update(ball, projectiles, consumables, platforms, endGame, lavaSquares) {
@@ -49,13 +52,12 @@ update(ball, projectiles, consumables, platforms, endGame, lavaSquares) {
     const scale = stepLen > maxStep ? maxStep / stepLen : 1;
     this.x += stepX * scale;
     this.y += stepY * scale;
-    
-    // Update spatial grid if position changed
-    if (this.needsGridUpdate) {
-        this.spatialGrid.update(this, this.x, this.y, this.size, this.size);
-        this.needsGridUpdate = false;
-    }
-    
+
+    // Enemies move every tick via dx/dy, so the grid entry must refresh every tick — gating
+    // it on a flag left cruising enemies registered in stale cells, so other squares' broad-
+    // phase queries missed them and separation silently failed.
+    this.spatialGrid.update(this, this.x, this.y, this.size, this.size);
+
     physics(this);
     
     // Get nearby lava squares for collision detection USING SPATIAL GRID
@@ -83,11 +85,6 @@ update(ball, projectiles, consumables, platforms, endGame, lavaSquares) {
     
     // Update splashes
     this.updateSplashes();
-    
-    // Mark for grid update if physics changed position
-    if (Math.abs(this.xPhysics) > 0.1 || Math.abs(this.yPhysics) > 0.1) {
-        this.needsGridUpdate = true;
-    }
 }
     
     destroy(consumables, ball, lavaSquares) {
@@ -129,13 +126,13 @@ update(ball, projectiles, consumables, platforms, endGame, lavaSquares) {
                 const dx = (this.x + this.size / 2) - (otherSquare.x + otherSquare.size / 2);
                 const dy = (this.y + this.size / 2) - (otherSquare.y + otherSquare.size / 2);
                 const distance = Math.sqrt(dx * dx + dy * dy);
-                
-                if (distance === 0) return;
-                
+
+                if (distance === 0) continue;
+
                 // Normalize direction vector
                 const nx = dx / distance;
                 const ny = dy / distance;
-                
+
                 // Separate squares
                 const separation = (this.size + otherSquare.size) / 2 - distance;
                 if (separation > 0) {
@@ -143,15 +140,16 @@ update(ball, projectiles, consumables, platforms, endGame, lavaSquares) {
                     this.y += ny * separation * 0.5;
                     otherSquare.x -= nx * separation * 0.5;
                     otherSquare.y -= ny * separation * 0.5;
-                    
+
                     // Update spatial grid
                     this.needsGridUpdate = true;
                     otherSquare.needsGridUpdate = true;
                 }
-                
-                // Bounce
-                this.dx = -Math.sign(this.dx) * this.speed;
-                this.dy = -Math.sign(this.dy) * this.speed;
+
+                // Bounce along the contact normal, so squares meeting head-on vertically
+                // (where dx≈0 makes sign(dx)=0) still separate instead of sticking.
+                this.dx = nx * this.speed;
+                this.dy = ny * this.speed;
             }
         }
     }
@@ -256,25 +254,13 @@ checkPlatformCollisions(platforms) {
                 if (this.y + this.size / 2 < platformTop + platform.height / 2) {
                     this.y = platformTop - this.size;        // eject up (sit on top)
                     if (this.dy > 0) this.dy = -Math.abs(this.dy) * 0.8;
-                    if (platform.yPhysics > 0) this.yPhysics = platform.yPhysics * 0.5;
                 } else {
                     this.y = platformBottom;                 // eject down
                     if (this.dy < 0) this.dy = Math.abs(this.dy) * 0.8;
-                    if (platform.yPhysics < 0) this.yPhysics = platform.yPhysics * 0.5;
                 }
             }
-            
-            // Update platform physics slightly (reaction force)
-            platform.xPhysics += this.dx * 0.1;
-            platform.yPhysics += this.dy * 0.1;
-            
-            // Update spatial grid for this lava square
-            this.needsGridUpdate = true;
-            
-            // Update spatial grid for platform (if platform module has update method)
-            if (platform.needsGridUpdate !== undefined) {
-                platform.needsGridUpdate = true;
-            }
+            // Platforms are static: no reaction force back onto them, and their grid entry
+            // never moves. (The old reaction wrote NaN onto uninitialised platform.xPhysics.)
         }
     }
 }
@@ -320,10 +306,15 @@ handleWorldBounds() {
         );
         
         if (distance < this.size / 2 + ball.radius) {
-            if (ball.dy * ball.radius > this.size * 8) {
+            const playerVX = (ball.dx || 0) + (ball.xPhysics || 0);
+            const playerVY = (ball.dy || 0) + (ball.yPhysics || 0);
+            const playerSpeed = Math.hypot(playerVX, playerVY);
+            const bigEnough = ball.radius >= this.size * 0.6;
+            if (bigEnough && playerSpeed * ball.radius > this.size * 4) {
                 // Player destroys lava square
                 ball.score += this.size * 2;
                 this.destroy(consumables, ball, lavaSquares);
+                return true;
             } else {
                 if (this.canvas) this.splashes.push(new Splash(
                     ball.x,
@@ -332,10 +323,57 @@ handleWorldBounds() {
                     '255,255,255',
                     'circle'
                 ));
-                ball.xPhysics += (this.x + this.size / 2 - ball.x) / 500;
-                ball.yPhysics += (this.y + this.size / 2 - ball.y) / 500;
+
+                // Failed eating attempt: separate the bodies and send both away along the
+                // collision normal. Position supplies a stable normal even when velocity is
+                // tangential; exact-center overlaps fall back to the relative motion direction.
+                const enemyCX = this.x + this.size / 2, enemyCY = this.y + this.size / 2;
+                let nx = ball.x - enemyCX, ny = ball.y - enemyCY;
+                let normalLength = Math.hypot(nx, ny);
+                if (normalLength < 1e-6) {
+                    nx = playerVX - this.dx - this.xPhysics;
+                    ny = playerVY - this.dy - this.yPhysics;
+                    normalLength = Math.hypot(nx, ny) || 1;
+                }
+                nx /= normalLength; ny /= normalLength;
+
+                const contactKey = ball.id ?? 'solo';
+                if (!(this.playerContactCooldowns.get(contactKey) > 0)) {
+                    ball.radius = removeArea(ball.radius, Math.pow(this.size * 0.16, 2));
+                    this.hitCount = Math.min(this.health, this.hitCount + 0.16);
+
+                    // Damage makes the enemy visibly larger while the existing material renderer
+                    // whites it according to hitCount/health. Grow about its centre, not one edge.
+                    const cx = this.x + this.size / 2, cy = this.y + this.size / 2;
+                    this.size = Math.min(this.baseSize * 1.6, this.size * 1.055 + 0.5);
+                    this.x = cx - this.size / 2;
+                    this.y = cy - this.size / 2;
+                    this.playerContactCooldowns.set(contactKey, 14);
+                }
+
+                const overlap = ball.radius + this.size / 2 - Math.hypot(
+                    ball.x - (this.x + this.size / 2), ball.y - (this.y + this.size / 2));
+                if (overlap > 0) {
+                    ball.x += nx * overlap * 0.55;
+                    ball.y += ny * overlap * 0.55;
+                    this.x -= nx * overlap * 0.45;
+                    this.y -= ny * overlap * 0.45;
+                }
+                const playerBounce = Math.min(GAME_CONFIG.PLAYER_MAX_SPEED,
+                    Math.max(ball.speed || 0, playerSpeed, this.speed * 1.5));
+                const enemyBounce = Math.max(this.speed * 1.35, playerSpeed * 0.55);
+                ball.dx = nx * playerBounce;
+                ball.dy = ny * playerBounce;
+                ball.xPhysics = ball.yPhysics = 0;
+                this.dx = -nx * enemyBounce;
+                this.dy = -ny * enemyBounce;
+                this.xPhysics = this.yPhysics = 0;
+                this.angle = Math.atan2(this.dy, this.dx);
+                this.needsGridUpdate = true;
+                this.spatialGrid.update(this, this.x, this.y, this.size, this.size);
             }
         }
+        return false;
     }
     
     // ---- Multiplayer: target/collide against N players instead of a single ball ----
@@ -363,10 +401,8 @@ handleWorldBounds() {
         this.x += stepX * scale;
         this.y += stepY * scale;
 
-        if (this.needsGridUpdate) {
-            this.spatialGrid.update(this, this.x, this.y, this.size, this.size);
-            this.needsGridUpdate = false;
-        }
+        // Refresh every tick (see update()): cruising enemies otherwise go stale in the grid.
+        this.spatialGrid.update(this, this.x, this.y, this.size, this.size);
         physics(this);
 
         this.checkLavaSquareCollisions(this.spatialGrid.getNearby(this.x, this.y, this.size, this.size), lavaSquares);
@@ -375,14 +411,17 @@ handleWorldBounds() {
 
         for (const ball of players) {
             this.checkProjectileCollisions(ball);
-            this.checkPlayerCollision(ball, consumables, lavaSquares);
+            if (this.checkPlayerCollision(ball, consumables, lavaSquares)) break;
         }
 
         this.updateSplashes();
-        if (Math.abs(this.xPhysics) > 0.1 || Math.abs(this.yPhysics) > 0.1) this.needsGridUpdate = true;
     }
 
     updateSplashes() {
+        for (const [id, ticks] of this.playerContactCooldowns) {
+            if (ticks <= 1) this.playerContactCooldowns.delete(id);
+            else this.playerContactCooldowns.set(id, ticks - 1);
+        }
         for (let i = this.splashes.length - 1; i >= 0; i--) {
             this.splashes[i].update();
             if (this.splashes[i].isFinished()) {

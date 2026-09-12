@@ -13,7 +13,6 @@ import { LOBBY } from '../sim/lobbyLayout.js';
 
 const WORLD_W = GAME_CONFIG.WORLD_WIDTH;
 const RADIUS = GAME_CONFIG.REF_HEIGHT / 18;
-const NAME_RE = /^[A-Za-z0-9 _-]{2,16}$/;
 const CODE_RE = /^[A-Za-z0-9_-]{1,24}$/;
 
 const MENU_X = WORLD_W / 2;
@@ -24,12 +23,11 @@ const ESW = 380, ESH = 150;                   // enemy box: wide horizontal bars
 const OFF_X = MENU_X + 1400;                  // off-screen right (options slide in from here)
 const pointInRect = (x, y, r) => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
 
-// hostName: the world this menu would host (defaults to the session's world). openCreate jumps
-// straight into the create form — used when you typed a lobby name that nobody is hosting yet.
+// hostName: the world this menu would host (defaults to the session's world). Shooting Create
+// hosts it instantly — no form; co-op/pvp and the name screen both live inside the lobby.
 export function createMenuScene(stage, { onSolo, onCreate, onJoin, isActive = () => true,
-                                         hostName = WORLD_NAME, openCreate = false, notice = '' }) {
-    let state = 'main';                       // main | createForm | joinForm | done
-    let mode = 'coop';
+                                         hostName = WORLD_NAME }) {
+    let state = 'main';                       // main | joinForm | done
     let lobbies = [];
     let lobbyLoadPending = false;
     let lastLobbyLoad = -Infinity;
@@ -86,29 +84,12 @@ export function createMenuScene(stage, { onSolo, onCreate, onJoin, isActive = ()
 
     const enemyBox = e => ({ x: e.x - ESW / 2, y: e.y - ESH / 2, w: ESW, h: ESH });
 
-    // Arriving here because a typed lobby didn't exist: skip the option bars and open the
-    // create form for that name, so "join something nobody hosts" becomes "host it".
-    if (openCreate) {
-        const target = enemies.find(e => e.kind === 'create');
-        target.x = target.homeX;                 // already in frame; no slide-in
-        active = target;
-        state = 'createForm';
-        for (const o of enemies) if (o !== target) o.targetX = OFF_X;
-        textInput.value = localStorage.getItem('subsurfaceName') || '';
-        setTimeout(focusTextInput, 0);
-    }
-
     // ---- form panel (grows on the chosen enemy) ----
     function panelRect() {
         // Both forms occupy the same slim column, centred in the open space
         // between the player and the viewport's right edge.
         return { ...LOBBY.panel };
     }
-    const nameBox = p => ({ x: p.x + 30, y: p.y + 70, w: p.w - 60, h: 52 });
-    const modeBoxes = p => ({
-        coop: { x: p.x + 30, y: p.y + 134, w: p.w - 60, h: 44 },
-        pvp: { x: p.x + 30, y: p.y + 190, w: p.w - 60, h: 44 }
-    });
     const codeBox = p => ({ x: p.x + 30, y: p.y + 70, w: p.w - 60, h: 52 });
     const lobbyRows = p => lobbies.slice(0, 2).map((l, i) => ({ x: p.x + 30, y: p.y + 138 + i * 40, w: p.w - 60, h: 34, lobby: l }));
     const confirmBox = p => ({ x: p.x + 30, y: p.y + p.h - 66, w: p.w - 60, h: 48 });
@@ -119,25 +100,16 @@ export function createMenuScene(stage, { onSolo, onCreate, onJoin, isActive = ()
         if (state === 'main') return enemies.filter(e => !e.dead).map(e => ({ rect: enemyBox(e), hit: () => onEnemyHit(e), kind: e.kind }));
         if (formOpen()) {
             const p = panelRect();
-            const confirm = { rect: confirmBox(p), hit: commitForm, kind: 'confirm' };
-            if (state === 'createForm') {
-                const { coop, pvp } = modeBoxes(p);
-                return [
-                    { rect: coop, hit: () => { mode = 'coop'; }, kind: 'coop' },
-                    { rect: pvp, hit: () => { mode = 'pvp'; }, kind: 'pvp' },
-                    confirm
-                ];
-            }
             return [
                 ...lobbyRows(p).map(row => ({
                     rect: row, hit: () => { textInput.value = row.lobby.id; }, kind: 'lobby'
                 })),
-                confirm
+                { rect: confirmBox(p), hit: commitForm, kind: 'confirm' }
             ];
         }
         return [];
     }
-    const formOpen = () => state === 'createForm' || state === 'joinForm';
+    const formOpen = () => state === 'joinForm';
     const titleBox = () => {
         const W = stage.canvas.width;
         const size = Math.min(120, W * 0.11);
@@ -155,7 +127,7 @@ export function createMenuScene(stage, { onSolo, onCreate, onJoin, isActive = ()
         if (!formOpen()) return false;
         const p = panelRect();
         const wx = stage.pointer.x + stage.cam.x, wy = stage.pointer.y + stage.cam.y;
-        return pointInRect(wx, wy, state === 'createForm' ? nameBox(p) : codeBox(p));
+        return pointInRect(wx, wy, codeBox(p));
     };
 
     // Pre-calculate the projectile arc for the current aim; return the target it would hit, or null.
@@ -187,13 +159,21 @@ export function createMenuScene(stage, { onSolo, onCreate, onJoin, isActive = ()
             // Hand control over after this simulation step. The game scene reuses this exact ball
             // and the existing camera keeps easing, so there is no timer or scene-cut jump.
             queueMicrotask(onSolo);
+        } else if (e.kind === 'create') {
+            // Host instantly. The lobby stages the arena; name entry (if unset) and co-op/pvp
+            // happen there. Hand off after this step like Singleplayer does.
+            splashAt(e.x, e.y);
+            e.dead = true;
+            for (const o of enemies) o.targetX = OFF_X;
+            state = 'done';
+            queueMicrotask(() => onCreate(hostName));
         } else {
             active = e;
-            state = e.kind === 'create' ? 'createForm' : 'joinForm';
+            state = 'joinForm';
             for (const o of enemies) if (o !== e) o.targetX = OFF_X;
-            textInput.value = e.kind === 'create' ? (localStorage.getItem('subsurfaceName') || '') : '';
+            textInput.value = '';
             focusTextInput();
-            if (e.kind === 'join') loadLobbies();
+            loadLobbies();
         }
     }
 
@@ -216,25 +196,18 @@ export function createMenuScene(stage, { onSolo, onCreate, onJoin, isActive = ()
     function commitForm() {
         const p = panelRect();
         splashAt(p.x + p.w / 2, p.y + p.h / 2);
-        if (state === 'createForm') { const n = textInput.value.trim(); if (!NAME_RE.test(n)) return; onCreate(n, mode, hostName); }
-        else { const c = textInput.value.trim().toUpperCase(); if (!CODE_RE.test(c)) return; onJoin(c); }
+        const c = textInput.value.trim().toUpperCase();
+        if (!CODE_RE.test(c)) return;
+        onJoin(c);
     }
 
-    // Text fields are ordinary point-and-click controls.
+    // The code field is an ordinary point-and-click control.
     function handleFormClick(e, wx, wy) {
         const p = panelRect();
-        if (state === 'createForm') {
-            if (pointInRect(wx, wy, nameBox(p))) {
-                e.preventDefault();
-                focusTextInput();
-                return true;
-            }
-        } else {
-            if (pointInRect(wx, wy, codeBox(p))) {
-                e.preventDefault();
-                focusTextInput();
-                return true;
-            }
+        if (pointInRect(wx, wy, codeBox(p))) {
+            e.preventDefault();
+            focusTextInput();
+            return true;
         }
         return false;
     }
@@ -260,7 +233,7 @@ export function createMenuScene(stage, { onSolo, onCreate, onJoin, isActive = ()
 
     // Esc backs out one step of the selection: an open form returns to the three options.
     function backOut() {
-        if (state !== 'createForm' && state !== 'joinForm') return false;
+        if (state !== 'joinForm') return false;
         state = 'main';
         active = null;
         for (const o of enemies) if (!o.dead) o.targetX = o.homeX;   // the options slide back in
@@ -397,29 +370,18 @@ export function createMenuScene(stage, { onSolo, onCreate, onJoin, isActive = ()
         // White-outlined panel, consistent with the menu (no orange, no hover on the panel itself).
         ctx.fillStyle = 'rgba(10,10,10,0.88)'; ctx.fillRect(p.x, p.y, p.w, p.h);
         ctx.strokeStyle = 'white'; ctx.lineWidth = 3; ctx.strokeRect(p.x, p.y, p.w, p.h);
-        wtext(ctx, active.kind === 'create' ? `Host ${hostName}` : 'Join Game', p.x + p.w / 2, p.y + 34, 30);
+        wtext(ctx, 'Join Game', p.x + p.w / 2, p.y + 34, 30);
 
-        if (active.kind === 'create') {
-            // Hosting opens THIS world up; the name others type in to join is the world's name.
-            wtext(ctx, notice || 'others join with this name', p.x + p.w / 2, p.y + 56, 17, 'center',
-                notice ? 'white' : 'rgba(255,255,255,0.55)');
-            fieldBox(ctx, nameBox(p), textInput.value, 'Your name');
-            const { coop, pvp } = modeBoxes(p);
-            // Selected mode stays inverted; the other inverts only while hovered.
-            menuButton(ctx, coop, 'Co-op', mode === 'coop' || pointInRect(wx, wy, coop));
-            menuButton(ctx, pvp, 'PvP', mode === 'pvp' || pointInRect(wx, wy, pvp));
-        } else {
-            fieldBox(ctx, codeBox(p), textInput.value.toUpperCase(), 'Lobby code');
-            const rws = lobbyRows(p);
-            if (!rws.length) wtext(ctx, 'No public lobbies', p.x + 30, p.y + 152, 20, 'left', 'grey');
-            for (const row of rws) {
-                const hot = pointInRect(wx, wy, row);
-                menuButton(ctx, row, `${row.lobby.id} — ${row.lobby.mode.toUpperCase()} — ${row.lobby.players}/${row.lobby.maxPlayers}`, hot, 20);
-            }
+        fieldBox(ctx, codeBox(p), textInput.value.toUpperCase(), 'Lobby code');
+        const rws = lobbyRows(p);
+        if (!rws.length) wtext(ctx, 'No public lobbies', p.x + 30, p.y + 152, 20, 'left', 'grey');
+        for (const row of rws) {
+            const hot = pointInRect(wx, wy, row);
+            menuButton(ctx, row, `${row.lobby.id} — ${row.lobby.mode.toUpperCase()} — ${row.lobby.players}/${row.lobby.maxPlayers}`, hot, 20);
         }
         // Confirm is shootable and inverts on hover like the other buttons.
         const c = confirmBox(p);
-        menuButton(ctx, c, active.kind === 'create' ? 'Create Lobby' : 'Join', pointInRect(wx, wy, c));
+        menuButton(ctx, c, 'Join', pointInRect(wx, wy, c));
     }
 
     return {

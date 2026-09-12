@@ -144,13 +144,27 @@ export function createGameServer({
     // Host is the earliest-joined player that is still connected (falls back to any).
     const liveHost = lobby => lobby.joinOrder.find(id => !lobby.clients.get(id).disconnected) ?? lobby.joinOrder[0];
 
+    // The creator leaving before the game starts destroys the lobby — there is no host migration
+    // in staging. Everyone still connected is told to fall back to the menu, then torn down.
+    function dissolveLobby(lobby) {
+        broadcast(lobby, { t: 'dissolve' });
+        for (const c of lobby.clients.values()) { try { c.ws.close(1000, 'Lobby closed'); } catch {} }
+        lobby.world = null;
+        lobby.clients.clear();
+        lobby.joinOrder.length = 0;
+        lobbies.delete(lobby.id);
+    }
+
     function fullyRemove(lobby, id) {
-        if (!lobby.clients.delete(id)) return;
+        if (!lobby.clients.has(id)) return;
+        if (lobby.status === 'staging' && lobby.joinOrder[0] === id) return dissolveLobby(lobby);
+        lobby.clients.delete(id);
         lobby.joinOrder.splice(lobby.joinOrder.indexOf(id), 1);
-        lobby.world?.removePlayer(id);
+        // Staging: the pad falls out and a fresh one drops into the seat. Mid-game: just gone.
+        if (lobby.status === 'staging') lobby.world?.vacateLobbySlot(id);
+        else lobby.world?.removePlayer(id);
         if (lobby.clients.size === 0) { lobby.world = null; lobbies.delete(lobby.id); return; }
         lobby.hostId = liveHost(lobby);
-        if (lobby.status === 'staging') lobby.world?.reassignLobbySlots(lobby.joinOrder);
         broadcastLobby(lobby);
         if (lobby.world) broadcast(lobby, { t: 'state', ...lobby.world.netSnapshot() });
         checkRoundOver(lobby);
@@ -279,8 +293,8 @@ export function createGameServer({
             lobby.clients.set(id, client);
             lobby.joinOrder.push(id);
             lobby.hostId = lobby.joinOrder[0];
-            // Lower in on a pad — live and identical for everyone already in the lobby.
-            if (!spectating) lobby.world.addLobbyPlayer(id, lobby.joinOrder.length - 1);
+            // Lower in on the lowest free pad — live and identical for everyone already in the lobby.
+            if (!spectating) lobby.world.addLobbyPlayer(id);
             send(ws, { t: 'welcome', id, lobby: lobby.id });
             broadcastLobby(lobby);
             console.log(`[subsurface] ${info.name} (${id}) joined ${lobby.id} (${lobby.clients.size} online)`);
@@ -311,6 +325,8 @@ export function createGameServer({
             if (!lobby.clients.has(id)) return; // graceful leave was already removed and broadcast
             // Mid-game: leave the player in the world as a frozen ghost that keeps respawning
             // until it fully dies (pvp: lives run out; coop: GHOST_MAX_RESPAWNS). Same cid rejoins it.
+            // A raw drop still ghosts even in staging (reconnectable); only a deliberate 'leave'
+            // message dissolves the lobby (host) or vacates a pad (guest).
             if (!client.eliminated && lobby.world?.players.has(id)) {
                 client.disconnected = true;
                 lobby.world.setInput(id, { keys: [], shooting: false });

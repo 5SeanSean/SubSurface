@@ -15,12 +15,17 @@ export const GAME_CONFIG = {
     MENU_HEADROOM: 1500,
     WORLD_WIDTH: 1920 * 3,
     WORLD_HEIGHT: 1080 * 3 + 1500,
+    // Visible depth of the bottom lava lake. Shared by simulation and rendering so its
+    // damaging surface always matches what players see.
+    LAVA_HEIGHT: 1080 / 6,
     PLATFORM_COUNT: 60,
-    MAX_LAVA_SQUARES: 20,
+    MAX_LAVA_SQUARES: 32,
+    ENEMY_SPAWN_INTERVAL: 2500,
     PHYSICS_DAMPING: 1.1,
     SPAWN_INTERVAL: 100,
     CELL_SIZE: 100,
     MAX_PARTICLES: 1000,
     MAX_PROJECTILES: 50,
-    MAX_SPLASHES: 200
+    MAX_SPLASHES: 200,
+    PLAYER_MAX_SPEED: 1080 / 72
 };

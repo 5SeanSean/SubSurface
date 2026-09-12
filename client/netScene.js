@@ -13,6 +13,7 @@ import { worldBounds } from '../view.js';
 import { LOBBY } from '../sim/lobbyLayout.js';
 import { Splash } from '../splash.js';
 import { GAME_CONFIG } from '../config.js';
+import { saveName } from './nameBadge.js';
 
 const NAME_RE = /^[A-Za-z0-9 _-]{2,16}$/;
 const MENU_BALL_RADIUS = GAME_CONFIG.REF_HEIGHT / 18;
@@ -36,12 +37,75 @@ export function createNetScene(stage, { lobbyId, name, create = false, mode = 'c
     const lobbyDebris = [];
     let shattered = false;
 
+    // Leaving is a local, ~1s drop-out that mirrors the drop-in: the staging platforms fall down
+    // out of frame (randomized per pad) and then the menu takes over. It plays for the leaver on
+    // Back/Leave and for guests told to leave by a host dissolving the lobby. The server does its
+    // own half for the players who stay (a guest's pad is replaced; a host's dissolve ejects all).
+    const LEAVE_MS = 850, LEAVE_STAGGER = 220;
+    const clamp01 = v => Math.max(0, Math.min(1, v));
+    let leaving = null;
+    // Two leave choreographies, both ~1s then a handoff to the menu:
+    //  - Host: the guest pads + divider fall out while the host's own pad stays (it becomes the
+    //    menu rock in place); the camera holds the lobby framing.
+    //  - Guest: the lobby freezes as a backdrop and only YOUR ball drops; the camera follows it
+    //    down, then rises back to the lobby framing so you land on the menu — you, not the host.
+    function requestLeave(after) {
+        if (leaving) return;
+        try { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: 'leave' })); } catch {}
+        const view = sceneState();
+        const iAmHost = isHost();
+        const meId = myId ?? handoffPlayerId;
+        const me = (view.players || []).find(p => p.id === meId);
+        const hostPadX = LOBBY.hostX - LOBBY.padW / 2;
+        leaving = {
+            t0: performance.now(), after, done: false, iAmHost, lavaY: view.lavaY ?? 0,
+            meId, meX: me?.x ?? 0, meFromY: me?.y ?? 0, fall: stage.canvas.height + 200,
+            plats: (view.platforms || []).map(p => ({
+                ...p, fromY: p.y,
+                // Guest: everything freezes. Host: keep the host pad, the rest falls.
+                keep: !iAmHost || (Math.abs(p.x - hostPadX) < 2 && Math.abs(p.y - LOBBY.restY) < 2),
+                delay: Math.random() * LEAVE_STAGGER
+            })),
+            players: (view.players || []).map(p => ({ ...p, fromY: p.y }))
+        };
+        if (!iAmHost) stage.camera.setTarget(leaveCameraTarget, { ease: 0.2, snap: false });
+    }
+    const leaveElapsed = () => performance.now() - leaving.t0;
+    const leaveBallY = t => leaving.meFromY + leaving.fall * (t * t);
+    // Follow the dropping ball, then ease back up to the lobby framing over the last stretch.
+    function leaveCameraTarget() {
+        if (!leaving) return menuCameraAnchor();
+        const t = clamp01(leaveElapsed() / LEAVE_MS);
+        if (t < 0.55) return { x: leaving.meX, y: leaveBallY(t) };
+        const k = (t - 0.55) / 0.45, holdY = leaveBallY(0.55), a = menuCameraAnchor();
+        return { x: leaving.meX + (a.x - leaving.meX) * k, y: holdY + (a.y - holdY) * k };
+    }
+    function leavingState() {
+        const t = leaveElapsed();
+        return {
+            enemies: [], consumables: [], lavaY: leaving.lavaY,
+            platforms: leaving.plats.map(p => {
+                if (p.keep) return p;
+                const k = clamp01((t - p.delay) / LEAVE_MS);
+                return { ...p, y: p.fromY + leaving.fall * (k * k) };
+            }),
+            // Host stays put; a guest drops only their own ball while everything else is frozen.
+            players: leaving.players.map(p => {
+                if (leaving.iAmHost || p.id !== leaving.meId) return p;
+                return { ...p, y: leaveBallY(clamp01(t / LEAVE_MS)) };
+            })
+        };
+    }
+
     // Locally generated arena, rebuilt whenever the server announces a new seed (i.e. a new round).
     let arena = null, arenaSeed = null;
     function syncArena(snapshot) {
         if (snapshot.seed !== arenaSeed) {
             arenaSeed = snapshot.seed;
             arena = setupPlatforms(stage.canvas, worldBounds, arenaSeed);
+            stage.background.setSeed(arenaSeed);
+            stage.lava.setSeed(arenaSeed);
+            stage.lavaBackground.setSeed(arenaSeed);
         }
         arena.applySync(snapshot.damage, snapshot.extras);
     }
@@ -52,11 +116,14 @@ export function createNetScene(stage, { lobbyId, name, create = false, mode = 'c
         x: worldBounds.right / 2 - stage.canvas.width * 0.167,
         y: LOBBY.restY - MENU_BALL_RADIUS - stage.canvas.height * 0.22
     });
-    stage.camera.setTarget(() => {
-        const me = world.players.find(p => p.id === myId);
-        if (lobby.status === 'staging' || lobby.status === 'starting') return menuCameraAnchor();
+    function gameCameraTarget() {
+        const me = world.players.find(p => p.id === (myId ?? handoffPlayerId));
         if (me) return me;
-        return world.players.length ? centroid(world.players) : null;
+        return world.players.length ? centroid(world.players) : menuCameraAnchor();
+    }
+    stage.camera.setTarget(() => {
+        if (lobby.status === 'staging') return menuCameraAnchor();
+        return gameCameraTarget();
     // Ease direct joins into the shared composition; seamless hosts are already at this anchor.
     }, { ease: 0.1 });
 
@@ -91,10 +158,13 @@ export function createNetScene(stage, { lobbyId, name, create = false, mode = 'c
         const field = { x: W / 2 - 180, y: H * 0.3, w: 360, h: 46 };
         const button = { x: W / 2 - 90, y: field.y + 70, w: 180, h: 48 };
         for (const [element, box] of [[nameInput, field], [nameSubmit, button]]) {
-            element.style.left = `${box.x}px`;
-            element.style.top = `${box.y}px`;
-            element.style.width = `${box.w}px`;
-            element.style.height = `${box.h}px`;
+            const client = stage.toClientRect(box);
+            element.style.left = `${client.x}px`;
+            element.style.top = `${client.y}px`;
+            element.style.width = `${client.w}px`;
+            element.style.height = `${client.h}px`;
+            element.style.borderWidth = `${3 * client.scale}px`;
+            element.style.fontSize = `${(element === nameInput ? 22 : 24) * client.scale}px`;
         }
         const visible = status === 'nameEntry';
         nameInput.hidden = !visible;
@@ -102,8 +172,11 @@ export function createNetScene(stage, { lobbyId, name, create = false, mode = 'c
         const buttonHot = visible && nameSubmit.matches(':hover');
         nameReticle.hidden = !buttonHot;
         if (buttonHot) {
-            nameReticle.style.left = `${stage.pointer.x}px`;
-            nameReticle.style.top = `${stage.pointer.y}px`;
+            const client = stage.toClientPoint(stage.pointer);
+            nameReticle.style.left = `${client.x}px`;
+            nameReticle.style.top = `${client.y}px`;
+            nameReticle.style.width = `${14 * client.scale}px`;
+            nameReticle.style.height = `${14 * client.scale}px`;
         }
     }
 
@@ -131,19 +204,31 @@ export function createNetScene(stage, { lobbyId, name, create = false, mode = 'c
         ws.onopen = () => { opened = true; clearTimeout(connectionTimer); status = 'connected'; };
         ws.onmessage = e => {
             let m; try { m = JSON.parse(e.data); } catch { return; }
+            // Host dissolved the lobby: fall back to the menu with the same drop-out.
+            if (m.t === 'dissolve') return requestLeave(() => onExit?.());
+            if (leaving) return;   // already animating out; ignore late server state
             if (m.t === 'welcome') { myId = m.id; create = false; }
             else if (m.t === 'lobby') {
+                const gameStarting = m.status === 'starting' && lobby.status !== 'starting';
                 lobby = m;
-                if (m.status === 'starting' && !shattered) shatterLobby();
+                if (gameStarting) {
+                    stage.camera.moveTo(gameCameraTarget, 1000);
+                    if (!shattered) shatterLobby();
+                }
                 if (m.status === 'staging') shattered = false;
+                pendingRename = null;   // any lobby broadcast carrying our new name confirms the rename
             }
             else if (m.t === 'state') { latest = m; snapshots.push(m, performance.now()); syncArena(m); }
+            else if (m.t === 'renameError') { message = m.message; pendingRename?.revert(); pendingRename = null; }
             else if (m.t === 'error') message = m.message;
         };
         ws.onerror = () => { try { ws.close(); } catch {} };
         ws.onclose = ev => {
             clearTimeout(connectionTimer);
             const reason = ev.reason || '';
+            if (leaving) return;   // we chose to leave; the drop-out is already running
+            // Host dissolved the lobby out from under us — leave with the same drop-out.
+            if (ev.code === 1000 && /lobby closed/i.test(reason)) return requestLeave(() => onExit?.());
             // A shared/stored name may already belong to somebody in this lobby. Keep the
             // player here and reuse the existing name-entry form instead of dead-ending on a
             // disconnected message.
@@ -181,7 +266,7 @@ export function createNetScene(stage, { lobbyId, name, create = false, mode = 'c
     // normal disconnect (your ghost is reclaimable if you come back).
     const pause = createPauseMenu(stage, [
         { label: 'Resume', action: () => input.unlock() },
-        ...(onExit ? [{ label: 'Leave Lobby', action: () => onExit() }] : [])
+        ...(onExit ? [{ label: 'Leave Lobby', action: () => requestLeave(() => onExit()) }] : [])
     ], { title: `Lobby ${lobbyId}` });
 
     const input = createInput({
@@ -195,20 +280,59 @@ export function createNetScene(stage, { lobbyId, name, create = false, mode = 'c
             return false;
         }
     });
+    // Two co-op/pvp toggles inside the staging panel, sitting just above the START button.
+    const modeBtns = () => {
+        const p = LOBBY.panel, w = (p.w - 70) / 2, y = p.y + 226, h = 34;
+        return { coop: { x: p.x + 30, y, w, h }, pvp: { x: p.x + 30 + w + 10, y, w, h } };
+    };
+    const isHost = () => lobby.hostId === myId;
+
     const onMouseDown = () => {
         if (pause.click()) return;
-        if (status === 'nameEntry') nameInput.focus();
+        if (status === 'nameEntry') { nameInput.focus(); return; }
+        // Only the host flips the mode, and only while staging (the round is derived from it).
+        if (lobby.status === 'staging' && isHost() && ws?.readyState === WebSocket.OPEN) {
+            const wx = stage.pointer.x + stage.cam.x, wy = stage.pointer.y + stage.cam.y;
+            const b = modeBtns();
+            for (const m of ['coop', 'pvp']) {
+                const r = b[m];
+                if (wx >= r.x && wx <= r.x + r.w && wy >= r.y && wy <= r.y + r.h) {
+                    if (lobby.mode !== m) ws.send(JSON.stringify({ t: 'mode', mode: m }));
+                    return;
+                }
+            }
+        }
     };
     window.addEventListener('mousedown', onMouseDown);
 
     function submitName() {
         const v = nameInput.value.trim();
         if (!NAME_RE.test(v)) { message = 'Name must be 2–16 letters, numbers, spaces, - or _.'; return; }
-        localStorage.setItem('subsurfaceName', v);
+        saveName(v);   // surfaces the top-right badge
         connect(v);
     }
 
+    // The universal name badge renaming: the lobby is the authority, so send it and let the
+    // server accept (name unique) or reject (revert the badge).
+    let pendingRename = null;
+    const onNameChange = e => {
+        if (ws?.readyState !== WebSocket.OPEN || !myId) return;   // not connected: the badge just stored it
+        pendingRename = e.detail;
+        ws.send(JSON.stringify({ t: 'rename', name: e.detail.name }));
+    };
+    window.addEventListener('namechange', onNameChange);
+
+    let lastPointerRevision = stage.pointer.revision;
     function update() {
+        // Mid drop-out: let the platforms fall (sceneState animates them), then hand off to the menu.
+        if (leaving) {
+            document.body.style.cursor = 'none';
+            if (!leaving.done && leaveElapsed() > LEAVE_MS + LEAVE_STAGGER) {
+                leaving.done = true;
+                leaving.after?.();
+            }
+            return;
+        }
         // Name entry uses a normal DOM-backed form, so reveal the OS pointer while it is open.
         // Once connected, the game goes back to its in-world aiming reticle.
         document.body.style.cursor = status === 'nameEntry' ? 'default' : 'none';
@@ -216,7 +340,9 @@ export function createNetScene(stage, { lobbyId, name, create = false, mode = 'c
         const me = world.players.find(p => p.id === myId);
         if (ws?.readyState === WebSocket.OPEN && me) {
             const aim = Math.atan2((stage.pointer.y + stage.cam.y) - me.y, (stage.pointer.x + stage.cam.x) - me.x);
-            ws.send(JSON.stringify({ t: 'input', ...input.read(), aim }));
+            const aimMoved = stage.pointer.revision !== lastPointerRevision;
+            lastPointerRevision = stage.pointer.revision;
+            ws.send(JSON.stringify({ t: 'input', ...input.read(), aim, aimMoved }));
         }
         for (let i = lobbyDebris.length - 1; i >= 0; i--) {
             lobbyDebris[i].update();
@@ -239,6 +365,12 @@ export function createNetScene(stage, { lobbyId, name, create = false, mode = 'c
     }
 
     function text(ctx, str, x, y, size, align = 'center', color = 'white') {
+        const visible = stage.visibleFrame;
+        const margin = Math.max(8, size * 0.65);
+        y = Math.max(visible.y + margin, Math.min(visible.y + visible.h - margin, y));
+        if (align === 'left') x = Math.max(visible.x + margin, x);
+        else if (align === 'right') x = Math.min(visible.x + visible.w - margin, x);
+        else x = Math.max(visible.x + margin, Math.min(visible.x + visible.w - margin, x));
         ctx.fillStyle = color; ctx.textAlign = align; ctx.textBaseline = 'middle';
         ctx.font = `${size}px 'boxycool', sans-serif`;
         ctx.fillText(str, x, y);
@@ -248,6 +380,7 @@ export function createNetScene(stage, { lobbyId, name, create = false, mode = 'c
     // is refreshed — the camera and input then read the same smoothed positions we draw, which
     // is what stops the screen juddering along with the ball.
     function sceneState() {
+        if (leaving) return leavingState();
         // Creating is an in-place ownership handoff, not a scene cut. Continue rendering the
         // menu's exact player/platform snapshot until the first authoritative state is ready.
         if (!latest && handoffState) { world = handoffState; return handoffState; }
@@ -257,6 +390,7 @@ export function createNetScene(stage, { lobbyId, name, create = false, mode = 'c
     }
 
     function draw(ctx) {
+        if (leaving) return;   // clean drop-out: world only, no panels/HUD/pause overlays
         const W = stage.canvas.width, H = stage.canvas.height;
         if (status === 'nameEntry') {
             ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fillRect(0, 0, W, H);
@@ -357,10 +491,10 @@ export function createNetScene(stage, { lobbyId, name, create = false, mode = 'c
     }
 
     return {
-        update, draw, state: sceneState,
+        update, draw, state: sceneState, requestLeave,
         get myId() { return myId ?? handoffPlayerId; },
         get reticleInvert() { return startButtonHovered(); },
-        get reticleOnTop() { return startButtonHovered(); },
+        get reticleOnTop() { return !!leaving || startButtonHovered(); },
         dispose() {
             input.dispose();
             window.removeEventListener('mousedown', onMouseDown);

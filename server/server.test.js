@@ -35,7 +35,7 @@ const connect = (port, { lobby, name, create = false, mode = 'coop', origin, cid
     ws.once('error', fail);
 });
 
-test('lobbies wait for their host, isolate worlds, migrate ownership, and disappear', async () => {
+test('lobbies wait for their host, isolate worlds, dissolve on host-leave, and disappear', async () => {
     const game = createGameServer({ port: 0, serveStatic: true });
     await new Promise(done => game.server.once('listening', done));
     const { port } = game.server.address();
@@ -82,13 +82,10 @@ test('lobbies wait for their host, isolate worlds, migrate ownership, and disapp
         const fifth = await connect(port, { lobby: 'BLUE', name: 'Fifth' });
         const fifthClose = await new Promise(done => fifth.once('close', (code, reason) => done({ code, reason: reason.toString() })));
         assert.deepEqual(fifthClose, { code: 4403, reason: 'Lobby is full' });
-        const secondId = [...blue.clients.keys()][1];
+        // Before the game starts there is no host migration: the creator leaving destroys the lobby.
         blueHost.send(JSON.stringify({ t: 'leave' }));
-        await waitUntil(() => blue.hostId === secondId && blue.clients.size === 3,
-            'host did not leave immediately or migrate to the second player');
-        assert.equal(blue.joinOrder[0], secondId, 'second player did not become first in join order');
-        assert.equal(blue.world.players.get(secondId).ball.x, LOBBY.hostX,
-            'new host was not moved onto the host platform');
+        await waitUntil(() => !game.lobbies.has('BLUE'),
+            'host leaving during staging did not dissolve the lobby');
 
         for (const ws of clients) ws.close();
         await waitUntil(() => game.lobbies.size === 0, 'empty lobbies were not deleted');
@@ -208,6 +205,7 @@ test('the host stays put while guest pads ease down and joined players fall in',
     const hostPadBefore = before.platforms[0];
     const guestPadBefore = before.platforms[1];
     const dividerBefore = before.platforms[4];
+    assert.equal(world.players.get(1).ball.armMode, 'locked', 'lobby player did not use locked arm physics');
 
     for (let i = 0; i < 30; i++) world.tick(GAME_CONFIG.TICK_DURATION);
 
@@ -218,6 +216,46 @@ test('the host stays put while guest pads ease down and joined players fall in',
     assert.equal(after.platforms[0].y, hostPadBefore.y, 'host platform descended');
     assert.ok(after.platforms[1].y > guestPadBefore.y, 'empty guest platform did not descend');
     assert.ok(after.platforms[4].y > dividerBefore.y, 'divider did not descend');
+
+    world.players.get(1).ball.armPivot = { x: 1, y: 2, distance: 3, platformId: 'old-pad' };
+    world.breakLobbyPlatforms();
+    assert.equal(world.players.get(1).ball.armMode, 'leverage', 'round start retained lobby-locked arm physics');
+    assert.equal(world.players.get(1).ball.armPivot, null, 'round start retained a stale lobby pivot');
+});
+
+test('shooting is size-free while staging and costs size after the lobby breaks', () => {
+    const world = createWorld({ mode: 'coop', lobby: true, seed: 43 });
+    world.addLobbyPlayer(1, 0);
+    const ball = world.players.get(1).ball;
+    const initialRadius = ball.radius;
+    ball.lastShotTime = -1000;
+    world.setInput(1, { keys: [], shooting: true, jump: false, aim: 0, aimMoved: false });
+    world.tick(GAME_CONFIG.TICK_DURATION);
+    assert.equal(ball.radius, initialRadius, 'lobby shot consumed player size');
+    assert.equal(ball.projectiles.length, 1, 'free lobby shot did not create a projectile');
+
+    world.breakLobbyPlatforms();
+    ball.lastShotTime = -1000;
+    world.tick(GAME_CONFIG.TICK_DURATION);
+    assert.ok(ball.radius < initialRadius, 'post-lobby shot did not resume consuming size');
+});
+
+test('lobby staging ignores movement, jumping, and space shooting', () => {
+    const world = createWorld({ mode: 'coop', lobby: true, seed: 44 });
+    world.addLobbyPlayer(1, 0);
+    const ball = world.players.get(1).ball;
+    const start = { x: ball.x, y: ball.y };
+    ball.lastShotTime = -1000;
+    world.setInput(1, {
+        keys: ['d', 's', ' '], shooting: false, jump: true,
+        aim: Math.PI / 2, aimMoved: true
+    });
+    for (let i = 0; i < 10; i++) world.tick(GAME_CONFIG.TICK_DURATION);
+
+    assert.equal(ball.x, start.x, 'movement input moved the lobby player');
+    assert.equal(ball.y, start.y, 'jump/down input moved the lobby player');
+    assert.equal(ball.projectiles.length, 0, 'space fired during lobby staging');
+    assert.equal(ball.aimAngle, Math.PI / 2, 'lobby control lock also blocked aiming');
 });
 
 test('a guest shot on START is consumed and triggers the alternate-message path', () => {

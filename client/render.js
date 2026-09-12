@@ -3,18 +3,17 @@
 // so any caller (menu, solo, later multiplayer) renders identically.
 // ponytail: mpClient.js still has its own copies for the networked path; unify in the lobby rework.
 import { SHOT_RANGE, sampleRange } from '../sim/playerRanges.js';
+import { playerArm, pointOverPlayer } from '../sim/playerGeometry.js';
+import { drawPlatformMaterial } from '../materials.js';
 
 export function drawPlatform(ctx, p) {
-    ctx.fillStyle = p.color || '#777';
-    ctx.fillRect(p.x, p.y, p.width, p.height);
+    drawPlatformMaterial(ctx, p);
     if (p.hitRectangles?.length) {
         ctx.fillStyle = 'grey';
         for (const crack of p.hitRectangles) {
             ctx.fillRect(p.x + crack.x, p.y + crack.y, crack.width, crack.height);
         }
     }
-    ctx.fillStyle = 'grey';
-    ctx.fillRect(p.x, p.y + p.height, p.width, 2);
 }
 
 export function drawProjectile(ctx, p) {
@@ -32,31 +31,54 @@ export function drawProjectile(ctx, p) {
 export function drawPlayer(ctx, p, myId) {
     const range = sampleRange(SHOT_RANGE, p.shotRange);
     const color = range.color;
-    const stock = p.maxStock ? p.currentStock / p.maxStock : 0;
-    const stickLength = p.radius * stock + p.radius;
-    const endX = p.x + stickLength * Math.cos(p.angle);
-    const endY = p.y + stickLength * Math.sin(p.angle);
+    const arm = playerArm(p);
 
     ctx.save();
     ctx.shadowColor = color;
     ctx.shadowBlur = p.radius / 2;
+    // Rectangular arm: square caps, one solid stroke sharing the body's colour + glow.
+    // The tip is pushed out by the capsule radius so the flat end still reaches the surface
+    // the physics capsule contacts (a butt cap otherwise stops short by that radius).
     ctx.beginPath();
     ctx.moveTo(p.x, p.y);
-    ctx.lineTo(endX, endY);
+    ctx.lineTo(arm.x2 + Math.cos(p.angle) * arm.radius, arm.y2 + Math.sin(p.angle) * arm.radius);
+    ctx.lineCap = 'butt';
     ctx.strokeStyle = color;
-    ctx.globalAlpha = 0.65;
     ctx.lineWidth = p.radius / 2 * range.scale;
     ctx.stroke();
-    ctx.globalAlpha = 1;
-    ctx.lineWidth = p.radius / 3 * range.scale;
-    ctx.stroke();
 
-    for (const [amount, alpha] of [[0.5, 0.2], [1, 0.1]]) {
-        ctx.beginPath();
-        ctx.arc(p.x - (p.dx || 0) * amount, p.y - (p.dy || 0) * amount, p.radius, 0, Math.PI * 2);
-        ctx.fillStyle = color;
-        ctx.globalAlpha = alpha;
-        ctx.fill();
+    // Motion blur: smear ghost copies back along the velocity (any direction), longer and denser
+    // the faster the body is moving. At rest it collapses to nothing.
+    const vx = p.dx || 0, vy = p.dy || 0;
+    const speed = Math.hypot(vx, vy);
+    // Reach visible blur at ordinary recoil/walk speeds rather than only near a full radius per
+    // tick. It still collapses completely at rest and remains proportional in every direction.
+    const blur = Math.min(1, speed / Math.max(1, p.radius * 0.42));
+    if (blur > 0.008) {
+        const ghosts = Math.round(3 + blur * 9);
+        for (let i = 1; i <= ghosts; i++) {
+            const t = i / ghosts;
+            const trailX = vx * t * 2.2, trailY = vy * t * 2.2;
+            ctx.globalAlpha = 0.22 * blur * (1 - t);
+
+            // Smear the arm with the body so fast movement reads as one rigid player silhouette
+            // instead of a blurred ball dragging a perfectly crisp detached limb.
+            ctx.beginPath();
+            ctx.moveTo(p.x - trailX, p.y - trailY);
+            ctx.lineTo(
+                arm.x2 + Math.cos(p.angle) * arm.radius - trailX,
+                arm.y2 + Math.sin(p.angle) * arm.radius - trailY
+            );
+            ctx.lineCap = 'butt';
+            ctx.strokeStyle = color;
+            ctx.lineWidth = p.radius / 2 * range.scale;
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.arc(p.x - trailX, p.y - trailY, p.radius, 0, Math.PI * 2);
+            ctx.fillStyle = color;
+            ctx.fill();
+        }
     }
     ctx.globalAlpha = 1;
     ctx.beginPath();
@@ -102,9 +124,12 @@ export function renderWorld(ctx, {
 
     const me = myId != null ? state.players.find(p => p.id === myId) : null;
     if (me && showReticle) {
+        const worldMouseX = mouseX + camX;
+        const worldMouseY = mouseY + camY;
+        const overPlayer = state.players.some(p => pointOverPlayer(p, worldMouseX, worldMouseY));
         ctx.save();
         ctx.fillStyle = 'white';
-        if (reticleInvert) {
+        if (reticleInvert || overPlayer) {
             ctx.globalCompositeOperation = 'difference';
             ctx.shadowBlur = 0;
         } else {
@@ -112,7 +137,7 @@ export function renderWorld(ctx, {
             ctx.shadowBlur = me.radius / 6;
         }
         ctx.beginPath();
-        ctx.arc(mouseX + camX, mouseY + camY, me.radius / 6, 0, Math.PI * 2);
+        ctx.arc(worldMouseX, worldMouseY, me.radius / 6, 0, Math.PI * 2);
         ctx.fill();
         ctx.restore();
     }

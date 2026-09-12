@@ -10,33 +10,35 @@ import { createGameScene } from './gameScene.js';
 import { createNetScene } from './netScene.js';
 import { WORLD_NAME } from './config.js';
 import { hashSeed } from '../sim/rng.js';
+import { createNameBadge, storedName } from './nameBadge.js';
 
 const stage = createStage();
+createNameBadge();   // universal top-right name chip, lives for the whole session
 let inMenu = true;
-const storedName = () => (localStorage.getItem('subsurfaceName') || '').trim();
+let activeScene = null;
+// A scene that owns a graceful exit (the lobby's drop-out) plays it before the next scene builds.
+const swap = scene => { activeScene = scene; stage.setScene(scene); return scene; };
 const setUrl = (mode, url) => {
     if (mode === 'push') history.pushState(null, '', url);
     else if (mode === 'replace') history.replaceState(null, '', url);
 };
 
-// Joining a world nobody hosts sends you here to host it instead, so the name the menu would
-// host isn't always the session's own world.
-export function showMenu({ createFor = null, notice = '', seed = null, historyMode = 'replace' } = {}) {
+// Joining a world nobody hosts sends you here to host it instead. Because Create Lobby now hosts
+// instantly (you pick co-op/pvp from inside the lobby), a named create skips the menu entirely
+// and drops straight into staging that world.
+export function showMenu({ createFor = null, seed = null, historyMode = 'replace' } = {}) {
+    if (createFor) return enterLobby({ lobbyId: createFor, name: storedName(), create: true, mode: 'coop', named: true, historyMode });
     inMenu = true;
-    const hostName = createFor || seed || WORLD_NAME;
+    const hostName = seed || WORLD_NAME;
     setUrl(historyMode, `?seed=${hostName}`);
     // Rebuild the backdrop for whichever world the menu is now offering, so the title,
     // the URL and the arena you are looking at all agree.
     stage.resetWorld(hashSeed(hostName));
-    stage.setScene(createMenuScene(stage, {
+    swap(createMenuScene(stage, {
         hostName,
-        openCreate: !!createFor,
-        notice,
-        onSolo: () => { inMenu = false; stage.setScene(createGameScene(stage, { onExit: showMenu })); },
-        onCreate: (playerName, gameMode, lobbyId) => {
-            localStorage.setItem('subsurfaceName', playerName);
-            enterLobby({ lobbyId, name: playerName, create: true, mode: gameMode, named: !!createFor });
-        },
+        onSolo: () => { inMenu = false; swap(createGameScene(stage, { onExit: showMenu })); },
+        // Create hosts immediately; the name screen (if unset) and co-op/pvp both live in the lobby.
+        onCreate: lobbyId => enterLobby({ lobbyId, name: storedName(), create: true, mode: 'coop', named: false }),
         onJoin: code => enterLobby({ lobbyId: code, name: storedName(), create: false, named: true }),
         isActive: () => inMenu
     }));
@@ -45,7 +47,7 @@ export function showMenu({ createFor = null, notice = '', seed = null, historyMo
 function enterLobby({ lobbyId, name, create, mode = 'coop', named, historyMode = 'push' }) {
     setUrl(historyMode, `?lobby=${lobbyId}`);
     inMenu = false;
-    stage.setScene(createNetScene(stage, {
+    swap(createNetScene(stage, {
         lobbyId, name, create, mode, named,
         onExit: showMenu,
         // Nobody is hosting that world — go and host it rather than dead-ending on an error.
@@ -64,9 +66,11 @@ export function start({ lobbyId = null } = {}) {
 window.addEventListener('popstate', () => {
     const params = new URLSearchParams(location.search);
     const lobbyId = params.get('lobby')?.toUpperCase();
-    if (lobbyId) {
-        enterLobby({ lobbyId, name: storedName(), create: false, named: true, historyMode: 'none' });
-    } else {
-        showMenu({ seed: params.get('seed')?.toUpperCase() || WORLD_NAME, historyMode: 'none' });
-    }
+    const nav = () => {
+        if (lobbyId) enterLobby({ lobbyId, name: storedName(), create: false, named: true, historyMode: 'none' });
+        else showMenu({ seed: params.get('seed')?.toUpperCase() || WORLD_NAME, historyMode: 'none' });
+    };
+    // Leaving a lobby plays its drop-out first, then the target scene builds.
+    if (activeScene?.requestLeave) activeScene.requestLeave(nav);
+    else nav();
 });

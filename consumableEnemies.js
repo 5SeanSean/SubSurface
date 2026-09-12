@@ -16,6 +16,7 @@ export class Consumable {
         this.yPhysics = yPhysics;
         this.xPhysics = xPhysics;
         this.speed = 0;
+        this.age = 0;   // ticks alive; expired by the world so uneaten loot can't pile up forever
     }
 
     draw(ctx) {
@@ -37,7 +38,7 @@ export class Consumable {
 update(nearbyPlatforms, worldBounds, canvas) {
     // Apply gravity
     this.dy += this.gravity;
-    if (this.y > worldBounds.bottom - GAME_CONFIG.REF_HEIGHT/18) {
+    if (this.y > worldBounds.bottom - GAME_CONFIG.LAVA_HEIGHT) {
         this.dy -= this.gravity * 2;
     }
     

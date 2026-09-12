@@ -16,29 +16,47 @@ export function getRandomLavaColor(rng = Math.random) {
 export function createLavaPattern(count, rng = Math.random, {
     minWidth = 0.14, maxWidth = 0.52,
     minHeight = 0.08, maxHeight = 0.24,
-    minSpeed = 0.00035, maxSpeed = 0.0014
+    minSpeed = 0.00035, maxSpeed = 0.0014,
+    randomDirections = false
 } = {}) {
-    return Array.from({ length: count }, () => ({
-        x: rng(),
-        y: rng(),
-        width: minWidth + rng() * (maxWidth - minWidth),
-        height: minHeight + rng() * (maxHeight - minHeight),
-        speed: minSpeed + rng() * (maxSpeed - minSpeed),
-        color: getRandomLavaColor(rng)
-    }));
+    return Array.from({ length: count }, () => {
+        const speed = minSpeed + rng() * (maxSpeed - minSpeed);
+        const angle = randomDirections ? rng() * Math.PI * 2 : 0;
+        return {
+            x: rng(),
+            y: rng(),
+            width: minWidth + rng() * (maxWidth - minWidth),
+            height: minHeight + rng() * (maxHeight - minHeight),
+            dx: Math.cos(angle) * speed,
+            dy: Math.sin(angle) * speed,
+            color: getRandomLavaColor(rng)
+        };
+    });
 }
 
 export function advanceLavaPattern(pattern, dtMs = 16) {
     const step = Math.min(dtMs, 100) / 16;
     for (const cell of pattern) {
-        cell.x += cell.speed * step;
+        cell.x += cell.dx * step;
+        cell.y += cell.dy * step;
         if (cell.x > 1) cell.x = -cell.width;
+        if (cell.x + cell.width < 0) cell.x = 1;
+        if (cell.y > 1) cell.y = -cell.height;
+        if (cell.y + cell.height < 0) cell.y = 1;
     }
 }
 
-export function drawLavaMaterial(ctx, bounds, pattern, { damage = 0, outline = false } = {}) {
+export function drawLavaMaterial(ctx, bounds, pattern, { damage = 0, shadow = false } = {}) {
     const { x, y, width, height } = bounds;
     if (width <= 0 || height <= 0) return;
+    if (shadow) {
+        ctx.save();
+        ctx.fillStyle = '#5a0500';
+        ctx.shadowColor = 'black';
+        ctx.shadowBlur = Math.max(8, Math.min(18, height * 0.14));
+        ctx.fillRect(x, y, width, height);
+        ctx.restore();
+    }
     ctx.save();
     ctx.beginPath();
     ctx.rect(x, y, width, height);
@@ -72,30 +90,24 @@ export function drawLavaMaterial(ctx, bounds, pattern, { damage = 0, outline = f
     }
     ctx.restore();
 
-    if (outline) {
-        ctx.save();
-        ctx.strokeStyle = 'black';
-        ctx.shadowColor = 'black';
-        ctx.shadowBlur = Math.max(8, Math.min(18, height * 0.14));
-        ctx.lineWidth = Math.max(2, Math.min(width, height) / 18);
-        ctx.strokeRect(x, y, width, height);
-        ctx.restore();
-    }
 }
 
-export function createLava(worldBounds,canvas) {
-    const pattern = createLavaPattern(150, Math.random, {
+export function createLava(worldBounds, canvas, seed = 1) {
+    let pattern;
+    const setSeed = nextSeed => { pattern = createLavaPattern(150, mulberry32((nextSeed ^ 0x1A4A1001) >>> 0), {
         minWidth: 0.01, maxWidth: 0.024,
         minHeight: 0.16, maxHeight: 0.65,
         minSpeed: 0.00008, maxSpeed: 0.00018
-    });
+    }); };
+    setSeed(seed);
     const splashes = []; // Initialize splashes array
 
     return {
         x: 0,
-        y: worldBounds.bottom - GAME_CONFIG.REF_HEIGHT/18,
+        y: worldBounds.bottom - GAME_CONFIG.LAVA_HEIGHT,
         width: worldBounds.right,
-        height: GAME_CONFIG.REF_HEIGHT/18,
+        height: GAME_CONFIG.LAVA_HEIGHT,
+        setSeed,
         draw(ctx) {
             ctx.save();
             const gradient = ctx.createLinearGradient(this.x, this.y , this.x, this.y- this.height * 5 );
@@ -161,16 +173,21 @@ export function createLava(worldBounds,canvas) {
 
 // Enemy lava uses the same material renderer as the floor, but each enemy owns a dense,
 // deterministic local pattern. That avoids small enemies sampling empty parts of a global field.
-export function createLavaBackground(worldBounds) {
+export function createLavaBackground(worldBounds, seed = 1) {
     const patterns = new Map();
+    let worldSeed = seed;
     const patternFor = enemy => {
         if (!patterns.has(enemy.id)) {
-            patterns.set(enemy.id, createLavaPattern(10, mulberry32(hashSeed(enemy.id))));
+            patterns.set(enemy.id, createLavaPattern(10,
+                mulberry32(hashSeed(`${worldSeed}:${enemy.id}`)), {
+                    minSpeed: 0.0014, maxSpeed: 0.0042, randomDirections: true
+                }));
         }
         return patterns.get(enemy.id);
     };
 
     return {
+        setSeed(nextSeed) { worldSeed = nextSeed; patterns.clear(); },
         update(dtMs = 16) {
             for (const pattern of patterns.values()) advanceLavaPattern(pattern, dtMs);
         },
@@ -183,7 +200,7 @@ export function createLavaBackground(worldBounds) {
                     ctx,
                     { x: enemy.x, y: enemy.y, width: enemy.size, height: enemy.size },
                     patternFor(enemy),
-                    { damage: enemy.health ? enemy.hitCount / enemy.health : 0, outline: true }
+                    { damage: enemy.health ? enemy.hitCount / enemy.health : 0, shadow: true }
                 );
             }
             for (const id of patterns.keys()) if (!live.has(id)) patterns.delete(id);

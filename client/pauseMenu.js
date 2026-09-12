@@ -58,7 +58,8 @@ export function createPauseMenu(stage, items, { title = 'Paused' } = {}) {
 
             ctx.fillStyle = 'rgba(255,255,255,0.55)';
             ctx.font = `20px 'boxycool', sans-serif`;
-            ctx.fillText('Esc to go back', W / 2, H - 40);
+            const visible = stage.visibleFrame;
+            ctx.fillText('Esc to go back', visible.x + visible.w / 2, visible.y + visible.h - 40);
 
             // Invert the reticle over buttons so it remains visible over either hover colour.
             const buttonHot = rects().some(r => hit(r, stage.pointer));

@@ -13,9 +13,10 @@ const W = worldBounds.right;
 
 export const LOBBY = {
     restY: 820,
-    // Staging pieces begin above their resting point, then ease through a seeded dip/bounce.
-    // Keeping the start inside the headroom lets incoming players visibly fall toward their pad.
-    drop: H * 0.55,
+    // Staging pieces begin ABOVE the visible frame (the camera's top edge can reach world-y 0 on
+    // tall windows), then ease through a seeded dip/bounce — so the drop-in reads as seamless
+    // rather than platforms popping into view. The same distance drives the drop-OUT on leave.
+    drop: H * 0.9,
     motionMs: 2200,
     motionJitterMs: 420,
     motionDelayMs: 140,
